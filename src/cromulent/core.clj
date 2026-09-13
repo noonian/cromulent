@@ -182,6 +182,13 @@
                  eg)]
         [(run-modify eg id) id]))))
 
+(defn lookup
+  "The canonical id of the class holding node (children are class
+  ids), or nil when the e-graph has no such node. Adds nothing."
+  [eg node]
+  (when-let [id (get (:memo eg) (canonicalize eg node))]
+    (find eg id)))
+
 (defn add
   "Add a whole term, bottom-up, sharing every subterm already present.
   Returns [eg' id]."

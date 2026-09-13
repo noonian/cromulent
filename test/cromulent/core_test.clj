@@ -44,6 +44,15 @@
            (eg/nodes g a)))
     (ok? g)))
 
+(deftest lookup-adds-nothing
+  (let [[g a] (eg/add (eg/egraph) [:+ :a 1])
+        one (second (eg/add g 1))]
+    (is (= one (eg/lookup g 1)))
+    (is (= a (eg/lookup g [:+ (eg/lookup g :a) one])))
+    (is (nil? (eg/lookup g :b)))
+    (is (nil? (eg/lookup g [:* (eg/lookup g :a) one])))
+    (is (= 3 (eg/node-count g)))))
+
 (deftest union-and-congruence
   ;; egg's README example: a*2 = a<<1, so (a*2)/2 = (a<<1)/2 by congruence
   (let [g (eg/egraph)

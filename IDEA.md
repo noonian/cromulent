@@ -482,7 +482,7 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   `map-children`, `compare-nodes`. bendix's own vocabulary (what a
   leaf means) sits above it in `bendix.term`.
 - `cromulent.core` — the persistent e-graph value: `egraph`, `add`,
-  `add-node`, `find`, `union`, `rebuild`, `eclass`, `nodes`, `data`,
+  `add-node`, `lookup`, `find`, `union`, `rebuild`, `eclass`, `nodes`, `data`,
   `roots`, `class-count`, `node-count`, `canonicalize`; several
   e-class analyses per e-graph under the section 9 contract
   (`make` with the class id, `merge` with the e-graph, data maps keyed
@@ -509,7 +509,7 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   section 3 (strict: after `rebuild`, memo keys, class nodes and parent
   keys are all canonical and parent ids are roots; the operator index
   is exact; analysis data equals the join over the class's nodes).
-- Tests (47 tests, 165 assertions). Core: the egg README example,
+- Tests (48 tests, 170 assertions). Core: the egg README example,
   cycles, persistence, constant folding (a flat lattice nil < number <
   :conflict, so contradictory scripts join to :conflict instead of
   throwing), two analyses side by side with per-analysis joins,

@@ -16,7 +16,11 @@
   bindings feed the right-hand side exactly as a pattern's would. A
   computed :rhs returns a pattern that is instantiated under the same
   bindings, or nil to decline the match; that is how a rule folds
-  constants or consults analysis data.
+  constants or consults analysis data. A searcher's match may also
+  carry its own :rhs, a pattern over its bindings, which takes
+  precedence over the rule's: one rule can then say a different thing
+  about every class (bendix's normal-form rules), and such a rule
+  passes nil as its :rhs.
 
   Both the guard and a computed :rhs see the e-graph as it was when
   the iteration's search ran, not the one being built by the other
@@ -45,7 +49,8 @@
 (defn rule
   "A rewrite from lhs to rhs. lhs is a pattern or a searcher
   (fn [eg] matches). rhs is a pattern whose variables all occur in
-  lhs, or (fn [eg bindings] pattern-or-nil). Options: :when, a guard
+  lhs, or (fn [eg bindings] pattern-or-nil), or nil when every match
+  of a searcher carries its own :rhs. Options: :when, a guard
   (fn [eg bindings] bool)."
   [name lhs rhs & {guard :when}]
   (when-not (or (fn? rhs) (fn? lhs))
@@ -132,7 +137,8 @@
   "Apply every match of rule to g. snapshot is the e-graph the matches
   were found in, which is what the guard and a computed rhs see.
   Returns [g' n-applied], counting only matches whose union merged two
-  classes. An exception raised while applying (an analysis refusing a
+  classes. A match carrying :rhs supplies its own right-hand side. An
+  exception raised while applying (an analysis refusing a
   merge, say) is rethrown with the rule's name and the match in its
   data."
   [snapshot g rule matches]
@@ -141,7 +147,10 @@
               (try
                 (if (and guard (not (guard snapshot bindings)))
                   [g n]
-                  (let [p (if (fn? rhs) (rhs snapshot bindings) rhs)]
+                  (let [p (cond
+                            (contains? m :rhs) (:rhs m)
+                            (fn? rhs) (rhs snapshot bindings)
+                            :else rhs)]
                     (if (nil? p)
                       [g n]
                       (let [[g id] (pat/instantiate g p bindings)]

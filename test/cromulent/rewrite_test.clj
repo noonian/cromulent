@@ -270,6 +270,25 @@
     (is (= (eg/find egraph fifty) (cg/id-of egraph [:big])))
     (is (not= (eg/find egraph five) (cg/id-of egraph [:big])))))
 
+(deftest a-match-may-carry-its-own-rhs
+  ;; one rule, a different right-hand side per class: every class
+  ;; holding a number n also holds [:num n]
+  (let [tag (rw/rule "tag"
+                     (fn [g]
+                       (into [] (keep (fn [r]
+                                        (when-let [n (some #(when (number? %) %) (eg/nodes g r))]
+                                          {:class r :bindings {'?r r} :rhs [:num n '?r]})))
+                             (eg/roots g)))
+                     nil)
+        [g _] (eg/add (eg/egraph) [:+ 5 50])
+        {:keys [egraph stop-reason iterations]} (rw/embiggen g [tag])]
+    (ok? egraph)
+    (is (= :saturated stop-reason))
+    (is (= 2 iterations) "one iteration applies, the next finds nothing new")
+    (is (= (cg/id-of egraph 5) (cg/id-of egraph [:num 5 5])))
+    (is (= (cg/id-of egraph 50) (cg/id-of egraph [:num 50 50])))
+    (is (= 5 (eg/node-count egraph)) "5, 50, their sum, and the two tags: nothing else")))
+
 (deftest failures-name-the-rule
   (let [boom (rw/rule "boom" '[:+ ?a ?b] (fn [_ _] (throw (ex-info "no" {:why :test}))))
         [g _] (eg/add (eg/egraph) [:+ 1 2])

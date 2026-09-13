@@ -350,8 +350,11 @@ are measured against.
 
 `:lhs` may be a *searcher* `(fn [eg] [{:class id :bindings {...}}])`
 in place of a pattern, egg's `Searcher` as a function; a pattern is
-the default searcher. This is what bendix's normal-form rules use
-(../bendix/IDEA.md section 3). A `:check` option, `(fn [g]
+the default searcher. A searcher's match may carry its own `:rhs`, a
+pattern over its bindings, which takes precedence over the rule's
+(then nil): one rule can say a different thing about every class.
+This is what bendix's normal-form rules use (../bendix/IDEA.md
+section 3). A `:check` option, `(fn [g]
 problem-or-nil)`, is a dev-mode oracle: after each rule's
 applications the runner rebuilds and runs it, and a problem throws
 naming the rule. Any exception raised while applying a rule is
@@ -491,7 +494,8 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
 - `cromulent.pattern` — e-matching over the operator index and
   `instantiate` (section 6).
 - `cromulent.rewrite` — rules as data (`rule`, `bidirectional`) with
-  pattern or searcher left-hand sides, `embiggen`/`saturate` with the
+  pattern or searcher left-hand sides, matches that carry their own
+  right-hand side, `embiggen`/`saturate` with the
   `:simple` and `:backoff` schedulers or a caller-supplied one,
   iteration/node/time limits, per-iteration stats with phase timings,
   optional timeline, the `:check` dev-mode oracle, failures that name
@@ -502,7 +506,7 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   section 3 (strict: after `rebuild`, memo keys, class nodes and parent
   keys are all canonical and parent ids are roots; the operator index
   is exact; analysis data equals the join over the class's nodes).
-- Tests (45 tests, 149 assertions). Core: the egg README example,
+- Tests (46 tests, 155 assertions). Core: the egg README example,
   cycles, persistence, constant folding (a flat lattice nil < number <
   :conflict, so contradictory scripts join to :conflict instead of
   throwing), two analyses side by side with per-analysis joins,
@@ -521,7 +525,8 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   order, every limit, the sum-of-5 blowup matching the formula in
   ../design/ac-problem.md (31 classes, 180 compound nodes), backoff
   banning and recovering to the same e-graph as simple, timelines, a
-  custom scheduler, a searcher rule, failures naming the rule; and
+  custom scheduler, a searcher rule, a searcher whose matches carry
+  their own right-hand sides, failures naming the rule; and
   four properties: random unsound rules over
   random scripts keep every invariant; sound integer identities
   (including two computed folding rules) preserve the value of every

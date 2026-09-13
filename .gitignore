@@ -1,0 +1,12 @@
+# tool caches
+.cpcache/
+.jolt/
+.nrepl-port
+trace.edn
+
+# build output
+target/
+*.build/
+
+# OS / editor
+.DS_Store

@@ -1,0 +1,431 @@
+# cromulent
+
+An e-graph library for Clojure, on Jolt and the JVM.
+
+A domain-agnostic equality-saturation library in pure Clojure, one
+source for Jolt and the JVM. It provides: a persistent e-graph value,
+e-matching, a rewrite runner, extraction, and e-class analyses. It
+does not know what `+` means.
+
+The reference design is egg (Willsey et al., POPL 2021): deferred
+rebuilding, e-class analyses, a phased runner. hegg (Haskell) shows the
+same design survives purity. What is new here is (a) the persistent
+value as the primary representation, with a data model shaped so
+that mutable working copies can be introduced where measurement says
+so, and (b) the AC work in ac-problem.md.
+
+Working name: **cromulent**. Every e-node in an e-class is a perfectly
+cromulent form of the same thing. Saturation, which grows the graph,
+is `embiggen`; extraction, which pulls the best term out, may be
+`yoink`. Serious aliases (`saturate`, `extract`) exist either way.
+
+## 0. Principles
+
+- **Performance over ergonomics, both where possible; pragmatic
+  idioms.** (Captain's direction, 2026-09-13.) The public API is pure
+  values in, pure values out.
+- **Do not optimize everything from the start.** The design and the
+  core data structures must *support* performance: dense ids so
+  tables can be vectors or arrays, canonical e-nodes as hashcons keys,
+  phase-separated algorithms that naturally form scopes, a seam
+  between the user's term shape and the internal e-node. The v1
+  *implementation* is plain persistent Clojure written with `reduce`
+  and transducers. Transients and arrays go in per algorithm, where a
+  `bench/` row on both runtimes points, and nowhere else.
+- The user-facing term shape (tagged vectors) and the internal e-node
+  representation are separate decisions. Convert at the boundary.
+- One source for Jolt and the JVM; no runtime-specific fast paths
+  unless a benchmark on both justifies the split.
+
+## 1. Portability constraints and what the runtime offers
+
+Both runtimes, one source. Verified on Jolt v0.8.7, 2026-09-13:
+
+- Available on both: maps, vectors, sets, sorted collections, records,
+  protocols, multimethods; **transients** (`transient`, `assoc!`,
+  `conj!`, `persistent!`); **primitive arrays** (`long-array`, `aget`,
+  `aset`, `alength`); `unchecked-*` arithmetic; `System/nanoTime`;
+  exact ratios and bignums; test.check.
+- Not available: Java interop, reflection, `gen-class`, `proxy`,
+  `java.util`. Whether `deftype` with mutable fields works on Jolt is
+  unverified and the design does not rely on it.
+- `hash` values differ across runtimes; nothing may persist or compare
+  hashes across processes. Structural equality is what we rely on.
+- `(= 1 1.0)` is false on both; the CAS uses exact numbers only.
+
+Measured costs, one million operations, arm64 macOS:
+
+| operation | Jolt 0.8.7 | JVM (Clojure 1.12) |
+|---|---|---|
+| persistent vector `assoc` | 717 ms | 125 ms |
+| transient vector `assoc!` | 420 ms | 40 ms |
+| persistent hash-map `assoc`, int keys | 862 ms | 362 ms |
+| transient hash-map `assoc!`, int keys | 442 ms | 192 ms |
+| hash-map `get`, keys `[:+ i j]` | 701 ms | 178 ms |
+| `long-array` `aset` | 12 ms | 5 ms |
+
+Three facts inform the design below without dictating v1. Jolt is
+three to six times slower than the JVM on persistent collections but
+only about twice as slow on arrays. Transients roughly halve update
+cost on both. Arrays are thirty-five times faster than transient
+vectors on Jolt. So the data model keeps the door open to arrays and
+transients; the benchmarks decide when to walk through it.
+
+## 2. Data model
+
+**Terms** are trees of tagged vectors. A compound node is a vector
+whose first element is the operator and whose remaining elements are
+child terms; anything that is not a vector is a leaf.
+
+```clojure
+[:+ [:* 2 :x] :y]        ;; (2·x) + y ; :x and :y are leaves
+[:pi]                     ;; nullary operator
+```
+
+The operator can be any value with structural equality. Leaves can be
+any non-vector value; a vector literal as a leaf must be wrapped by
+the caller (`[:const [1 2]]`). This one shape rule keeps the core
+tag-agnostic: the CAS decides the vocabulary.
+
+**E-nodes** have the same shape with children replaced by e-class ids:
+`[:+ 4 7]`, or a leaf. An e-node is *canonical* when every child id is
+a union-find root. This is the *logical* e-node; the hashcons may key
+on a packed form (section 5).
+
+**E-class ids** are dense non-negative integers allocated
+sequentially, which is why every id-indexed table below is a vector,
+not a map.
+
+**The persistent e-graph** is a map (or record; measure on Jolt):
+
+```clojure
+{:next-id  0
+ :uf       []      ;; vector, id -> parent id; a root points to itself
+ :size     []      ;; vector, root id -> class size (union by size)
+ :memo     {}      ;; canonical e-node -> class id           (the hashcons)
+ :classes  []      ;; vector, root id -> {:id id
+                   ;;                     :nodes   #{e-node ...}
+                   ;;                     :parents {e-node id ...}   ; parent e-node -> its class
+                   ;;                     :data    any}             ; analysis data
+                   ;;          nil for non-roots
+ :pending  #{}     ;; root ids whose parents need repair (the rebuild worklist)
+ :analysis nil}    ;; an Analysis value, or nil
+```
+
+A tiny `TermLike` protocol (`operator`, `children`, `make-node`,
+`leaf?`) is extended to vectors by default, so the CAS or the
+catalytic libraries could change representation without touching the
+core. It is also the seam that lets the internal e-node form differ
+from the user's. Do not build anything else generic.
+
+## 3. Invariants
+
+After `rebuild` (and after any scope exit), all of these hold; a
+`check-invariants` function asserts them in tests after every
+operation:
+
+1. Every non-nil entry of `:classes` is at a union-find root.
+2. Every key of `:memo` is canonical, and maps to a root.
+3. For every class `c` and every node `n` in `(:nodes c)`,
+   `(canonicalize n)` is in `:memo` and maps to `c`. (Congruence
+   closure.)
+4. For every class `c` and every `[p pid]` in `(:parents c)`, `p`
+   mentions `c` as a child and `(find pid)` is the class containing `p`.
+5. `:pending` is empty.
+6. Analysis data of every class equals the join of `make` over its
+   nodes.
+7. (Once scoped algorithms exist.) After a scope exit, every entry of
+   `:uf` points directly at its root (fully compressed).
+
+Between `merge` and `rebuild` only 1 holds; that is the deferred
+rebuilding trade and it is what makes saturation fast.
+
+## 4. Core operations
+
+All are pure. Operations that allocate an id return a pair.
+
+```clojure
+(egraph)                    ;; empty; (egraph {:analysis a})
+(add eg term)      -> [eg' id]   ;; whole term, hashconsed bottom-up
+(add-node eg node) -> [eg' id]   ;; one e-node with child ids
+(find eg id)       -> root-id
+(merge eg a b)     -> [eg' root] ;; union by size; records root in :pending
+(rebuild eg)       -> eg'        ;; restore invariants 2..7
+(class eg id)      -> class map
+(nodes eg id)      -> #{canonical e-nodes of the class}
+```
+
+In v1 everything works on the persistent value directly: vector
+`assoc`, map `assoc`, a read-only `find` walk, algorithms as `reduce`
+over worklists. `find` is O(log n) by union by size; `rebuild` may
+compress the paths it touches since it is producing a new value
+anyway. The data model is shaped so that the batch algorithms
+(`rebuild`, `saturate`, `ematch`, `extract`, future AC machinery) can
+each later move inside a **scope** with mutable tables (section 5),
+one at a time, when a benchmark says that one is the bottleneck.
+
+**Rebuild** is egg's algorithm:
+
+```
+loop while pending non-empty
+  todo := distinct roots of pending ; pending := empty
+  for c in todo: repair c
+repair c
+  for [p pid] in parents(c)
+    remove (old canonical p) from memo
+    p' := canonicalize p ; root := find pid
+    if memo has p' -> other  then union other root   ; adds to pending
+    else memo[p'] := root
+  dedupe parents(c) by canonical form, unioning any classes whose
+    parent nodes collided
+  for each distinct parent class: re-make analysis data; if it changed,
+    add that class to pending, then run (:modify analysis)
+```
+
+Termination: each union strictly reduces the number of roots; each
+repair either unions or converges. Same argument as egg.
+
+## 5. Persistence and performance
+
+The persistent value is the API and, in v1, the implementation. The
+performance plan is a *path*, not a starting point:
+
+1. v1: persistent throughout, `reduce`/transducers, no lazy seqs in
+   the core algorithms (that much is idiom, not optimization).
+2. `bench/` from the first milestone; the sum-of-*n* fixture and
+   egg's `math` suite on both runtimes.
+3. When a row shows an algorithm is the bottleneck, that algorithm
+   moves inside a **scoped working copy**: same algorithm, mutable
+   tables, one thread, no escape, persistent value produced at exit.
+   This is `(persistent! (reduce conj! (transient v) xs))` applied to
+   the e-graph, the standard Clojure answer to "pure outside, fast
+   inside", and the data model below is what makes it a local change
+   rather than a rewrite.
+
+The scoped representation, when an algorithm earns it, chosen from
+the measurements in section 1:
+
+| table | persistent | scoped |
+|---|---|---|
+| `:uf`, `:size` | vectors | `long-array`s with path compression |
+| `:memo` | hash map | transient hash map |
+| `:classes` | vector | transient vector of (transient or plain) class maps |
+| `:pending` | set | transient set, or a long-array used as a stack |
+
+Scope entry copies `:uf`/`:size` into arrays (O(n), a few
+milliseconds at 10⁶ ids) and calls `transient` on the maps (O(1)).
+Scope exit runs one full compression pass over the array, so every
+id points at its root, then `vec`s the arrays and `persistent!`s the
+maps. Because exit always leaves the union-find fully compressed, the
+persistent value never needs compression and single-operation `find`
+stays cheap.
+
+What the data model commits to now so that step 3 stays local:
+
+- Ids are dense integers; every id-indexed table is a vector (later,
+  an array) and never a map.
+- The hashcons is keyed by canonical e-nodes; the key's internal form
+  is behind the term seam, so a **packed e-node key** (operator index
+  and up to two child ids in one long; larger arities fall back to
+  vectors) or per-operator sub-indexes can be tried later without
+  touching callers. Map lookups keyed by e-node cost about 0.7 µs on
+  Jolt and will dominate e-matching; this is the first thing the
+  benchmarks will point at.
+- Core algorithms are written as `reduce` over explicit worklists, not
+  lazy pipelines, so that swapping a persistent table for a transient
+  one inside them is mechanical.
+- Records vs maps for the e-graph value and class maps: undecided;
+  measure on Jolt when it matters.
+
+What persistence still buys, unchanged:
+
+- **Timelines.** `(saturate eg rules {:timeline? true})` retains the
+  e-graph after each iteration, the same idea as
+  `catalytic.pure/timeline`; each retained value costs one O(n)
+  union-find vector. `(diff eg1 eg2)` is a set difference on `:memo`.
+- **Speculation.** Run a risky or expensive burst of rules on a copy
+  (free), keep it only if extraction improves. This is approach D in
+  ../design/ac-problem.md and needs no undo log.
+- **Value equality** of e-graphs.
+
+**Benchmarks from the first milestone**, in `bench/` per the
+catalytic convention, timed with `System/nanoTime` on both runtimes
+and with `jolt build` native binaries for headline numbers. Fixtures:
+the sum-of-*n* AC blowup (../design/ac-problem.md), egg's `math` rule set and
+its standard inputs, and a mixed CAS workload once bendix has one.
+Every performance option above is adopted or rejected by a row in
+that table, not by taste.
+
+## 6. E-matching
+
+Patterns are terms containing pattern variables: symbols starting with
+`?`. Variables never appear in terms, so patterns are visibly distinct.
+
+```clojure
+'[:* ?a 2]
+'[:+ ?x [:* ?y ?z]]
+```
+
+v1 is the backtracking matcher: to match pattern `p` against class
+`c`, for each e-node in `c` with the same operator and arity, match
+children pairwise, threading a bindings map `{?a id}`; a repeated
+variable must `find` to the same root. `(ematch eg pattern)` returns a
+vector of `{:class id :bindings {...}}` over every class. Later,
+by benchmark: precompiled patterns, per-operator indexes, and the
+relational e-matcher (Zhang et al. 2022). None changes the API.
+
+AC patterns (bag children, rest variables) are a matcher extension
+specified in ../design/ac-problem.md, not part of v1.
+
+## 7. Rewrites and the runner
+
+A rewrite is data:
+
+```clojure
+{:name "mul-2-to-shift"
+ :lhs  '[:* ?a 2]
+ :rhs  '[:<< ?a 1]              ;; or (fn [eg bindings] term) for computed results
+ :when (fn [eg bindings] bool)} ;; optional guard; sees analysis data
+(rule "name" lhs rhs & {:keys [when]})   ;; constructor; a macro variant quotes for you
+(bidirectional "name" lhs rhs)           ;; two rewrites
+```
+
+One saturation iteration, in egg's phase order so results do not
+depend on rule order:
+
+1. **search**: every rule against the same e-graph; collect matches.
+2. **apply**: for each match, instantiate `:rhs` under the bindings,
+   add it, union with the matched class.
+3. **rebuild**.
+4. **stop?** Saturated (no new node, no union); or `:iter-limit`,
+   `:node-limit`, `:time-limit`.
+
+```clojure
+(embiggen eg rules {:iter-limit 30 :node-limit 10000 :time-limit-ms 5000
+                    :scheduler :backoff :timeline? false})
+=> {:egraph eg' :iterations n :stop-reason :saturated ; | :iter-limit | :node-limit | :time-limit
+    :stats [{:iter 1 :nodes n :classes m :applied {"rule" k ...}} ...]}
+```
+
+Schedulers: `:simple` (everything, every iteration) and `:backoff`
+(egg's: a rule that exceeds its match budget is banned for a doubling
+number of iterations). Backoff is not our answer to AC; it is the
+baseline the AC experiments (../design/ac-problem.md) are measured against.
+
+## 8. Extraction
+
+```clojure
+(extract eg root cost-fn) -> {:cost c :term t}
+```
+
+`cost-fn` is `(fn [e-node child-costs] number)`; the default is AST
+size. Bottom-up fixpoint over all classes, egg's Extractor, costs in a
+vector indexed by class id: iterate until no class's best cost
+changes; a node whose child has no cost yet is skipped, which is why
+cycles (`x = x + 0`) are harmless. Then rebuild the term top-down from each class's best node.
+bendix supplies cost functions that encode taste (../design/bendix.md);
+the core guarantees the minimum.
+
+## 9. E-class analyses
+
+Egg's mechanism, as a map of functions so analyses compose as data:
+
+```clojure
+{:name   :const-fold
+ :make   (fn [eg e-node] data)        ;; children canonical; may read their :data
+ :merge  (fn [a b] data)              ;; lattice join: associative, commutative, idempotent
+ :modify (fn [eg id] eg)}             ;; may add nodes / union, e.g. add the folded constant
+```
+
+Several analyses run together via `(compose a b c)`, whose data is a
+map keyed by `:name`. The lattice discipline is the whole correctness
+story: `merge` must be a join and `make` monotone in the children's
+data, or rebuild may not terminate. Tests check this on random
+e-graphs. Analyses read the e-graph only through the public read API,
+so a later scoped rebuild can hand them a working copy unchanged.
+
+**Analysis-driven merging** (`:modify` unioning two classes whose data
+proves them equal) is how the CAS brings decision procedures into the
+e-graph (../design/bendix.md, ../design/ac-problem.md approach C).
+Constant folding is the degenerate case.
+
+## 10. Testing
+
+- `check-invariants` after every operation in tests (section 3).
+- test.check generators: random terms over a small signature, random
+  sequences of `add`/`merge`/`rebuild`, random rule sets. Properties:
+  invariants hold; `find` is idempotent; the old value is unchanged
+  after any operation (persistence); `rebuild` is idempotent.
+- **Scoped and persistent agree** (once any scoped algorithm exists):
+  the same operation sequence yields the same partition and memo
+  either way.
+- **Differential test** against a naive reference: brute-force
+  congruence closure over an explicit equivalence relation on a small
+  finite set of terms.
+- Acceptance examples from the egg README.
+- Both runtimes in CI from day one; benchmarks in `bench/` from the
+  first milestone.
+
+## 11. Later
+
+- **Explanations**: egg's proof production. A persistent union history
+  makes this easier than in egg; a CAS wants it for "show your work".
+- **Relational e-matching**, **packed e-node keys**, **per-operator
+  indexes**, **egglog-style Datalog rules**: all after v1, all
+  API-neutral, all adopted by benchmark.
+
+## 12. Open questions
+
+- Pair-returning `add`/`merge` vs. an accumulator style
+  (`(with-egraph eg (add! ...) (merge! ...))`). Pairs for v1. If a
+  scoped tier lands, exposing it as a public `with-scope` for callers
+  who add thousands of terms is a later ergonomics call.
+- Should `:nodes` hold canonical or as-inserted e-nodes? egg keeps
+  as-inserted and canonicalizes in repair. Decide with the invariant
+  checker in hand.
+- Whether the `:when` guard sees the e-graph before or after the
+  iteration's other applications. Keep egg's answer (before) unless
+  the CAS needs otherwise.
+- Records vs maps on Jolt (measure).
+
+## Status
+
+Implemented (2026-09-13), tests green on JVM (Clojure 1.12) and Jolt
+v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
+
+- `cromulent.term` — the representation seam (tagged vectors).
+- `cromulent.core` — the persistent e-graph value: `egraph`, `add`,
+  `add-node`, `find`, `union`, `rebuild`, `eclass`, `nodes`, `roots`,
+  `class-count`, `node-count`, `canonicalize`; e-class analyses with
+  `:make`/`:merge`/`:modify`, run at `add-node`, `union`, and during
+  rebuild. Plain persistent Clojure throughout, as decided: no
+  transients, no arrays. `rebuild` is egg's worklist repair followed by
+  one linear pass that compresses every union-find path, canonicalizes
+  every class's nodes and parents, and rebuilds the hashcons from the
+  classes; that pass is the first thing to amortize when a benchmark
+  says so.
+- `cromulent.check` — `violations` / `check!` over the invariants in
+  section 3 (strict: after `rebuild`, memo keys, class nodes and parent
+  keys are all canonical and parent ids are roots).
+- Tests: the egg README example, cycles, persistence, constant folding
+  (a flat lattice nil < number < :conflict, so contradictory scripts
+  join to :conflict instead of throwing), and four test.check
+  properties at 200 cases each over random add/union/rebuild scripts:
+  invariants hold and rebuild is idempotent; the partition equals a
+  naive reference congruence closure; the same with the analysis on;
+  and the analysed graph merges a superset of the reference.
+- `bench/` — three fixtures, deterministic across runtimes (identical
+  node and class counts):
+
+  | fixture | n | JVM | Jolt |
+  |---|---|---|---|
+  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 214 ms | 390 ms |
+  | union + rebuild (random unions on the above) | 2 000 | 114 ms | 163 ms |
+  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 11 ms | 27 ms |
+
+  JVM numbers include JIT warm-up; neither is tuned. They are the
+  baseline for every later optimization row.
+
+Not yet: e-matching (section 6), rewrites and the runner (7),
+extraction (8), `compose` for analyses (9), explanations, the AC
+experiments. CI workflow is written but the repository has no remote.

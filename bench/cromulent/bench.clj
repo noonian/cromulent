@@ -5,7 +5,8 @@
 
   Inputs come from a small LCG so both runtimes build identical
   e-graphs. Numbers are printed as a table; IDEA.md records them."
-  (:require [cromulent.core :as eg]))
+  (:require [cromulent.core :as eg]
+            [cromulent.pattern :as pat]))
 
 (defn- now-ms [] (/ (double (System/nanoTime)) 1e6))
 
@@ -66,13 +67,23 @@
     {:fixture "chain-collapse" :n n :ms (+ ms-u ms-r) :union-ms ms-u :rebuild-ms ms-r
      :nodes (eg/node-count g) :classes (eg/class-count g)}))
 
+(defn ematch
+  "Match pattern p against g."
+  [g label p]
+  (let [[ms matches] (timed #(pat/ematch g p))]
+    {:fixture (str "ematch " label) :n (count matches) :ms ms
+     :nodes (eg/node-count g) :classes (eg/class-count g)}))
+
 (defn- row [{:keys [fixture n ms nodes classes]}]
-  (println (format "%-16s n=%-7d %8.1f ms   nodes=%-7d classes=%d" fixture n (double ms) nodes classes)))
+  (println (format "%-22s n=%-7d %8.1f ms   nodes=%-7d classes=%d" fixture n (double ms) nodes classes)))
 
 (defn -main [& _]
   (println "cromulent bench")
-  (let [a (add-terms 20000 4)]
+  (let [a (add-terms 20000 4)
+        g (:egraph a)]
     (row a)
-    (row (union-rebuild (:egraph a) 2000)))
+    (row (ematch g "[:+ ?a [:* ?b ?c]]" '[:+ ?a [:* ?b ?c]]))
+    (row (ematch g "[:+ ?x ?x]" '[:+ ?x ?x]))
+    (row (union-rebuild g 2000)))
   (row (chain 2000))
   (System/exit 0))

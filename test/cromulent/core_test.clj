@@ -5,6 +5,7 @@
             [clojure.test.check.properties :as prop]
             [cromulent.core :as eg]
             [cromulent.check :as check]
+            [cromulent.gen :as cg :refer [script-gen run-script]]
             [cromulent.term :as term]))
 
 (defn- ok?
@@ -140,49 +141,6 @@
 ;; ---------------------------------------------------------------------------
 ;; property tests
 
-(def leaf-gen (gen/elements [:a :b :c 0 1 2]))
-
-(def term-gen
-  (gen/recursive-gen
-   (fn [inner]
-     (gen/one-of [(gen/tuple (gen/return :+) inner inner)
-                  (gen/tuple (gen/return :*) inner inner)
-                  (gen/tuple (gen/return :neg) inner)]))
-   leaf-gen))
-
-(def op-gen
-  (gen/frequency [[5 (gen/tuple (gen/return :add) term-gen)]
-                  [3 (gen/tuple (gen/return :union) term-gen term-gen)]
-                  [1 (gen/return [:rebuild])]]))
-
-(def script-gen (gen/vector op-gen 1 40))
-
-(defn subterms [t]
-  (if (term/compound? t)
-    (cons t (mapcat subterms (term/children t)))
-    [t]))
-
-(defn run-script
-  "Run a script of [:add t] / [:union t1 t2] / [:rebuild] ops against g.
-  Returns {:egraph g :terms #{...} :eqs [[t1 t2] ...]} with g rebuilt."
-  [g ops]
-  (-> (reduce (fn [{:keys [egraph terms eqs]} [op & args]]
-                (case op
-                  :add (let [[t] args
-                             [g _] (eg/add egraph t)]
-                         {:egraph g :terms (into terms (subterms t)) :eqs eqs})
-                  :union (let [[t1 t2] args
-                               [g a] (eg/add egraph t1)
-                               [g b] (eg/add g t2)
-                               [g _] (eg/union g a b)]
-                           {:egraph g
-                            :terms (into terms (concat (subterms t1) (subterms t2)))
-                            :eqs (conj eqs [t1 t2])})
-                  :rebuild {:egraph (eg/rebuild egraph) :terms terms :eqs eqs}))
-              {:egraph g :terms #{} :eqs []}
-              ops)
-      (update :egraph eg/rebuild)))
-
 ;; A naive reference: congruence closure over a finite set of ground
 ;; terms (closed under subterms), as a map term -> parent term.
 
@@ -213,11 +171,10 @@
 (defn same-partition?
   "Do g and the reference closure agree on every pair of terms?"
   [g terms rep]
-  (let [id-of (fn [t] (eg/find g (second (eg/add g t))))]
-    (every? (fn [[s t]]
-              (= (= (rep-find rep s) (rep-find rep t))
-                 (= (id-of s) (id-of t))))
-            (for [s terms, t terms] [s t]))))
+  (every? (fn [[s t]]
+            (= (= (rep-find rep s) (rep-find rep t))
+               (= (cg/id-of g s) (cg/id-of g t))))
+          (for [s terms, t terms] [s t])))
 
 (def ^:private num-tests 200)
 
@@ -253,10 +210,9 @@
              num-tests
              (prop/for-all [ops script-gen]
                (let [{:keys [egraph terms eqs]} (run-script (eg/egraph {:analysis const-fold}) ops)
-                     rep (reference-closure terms eqs)
-                     id-of (fn [t] (eg/find egraph (second (eg/add egraph t))))]
+                     rep (reference-closure terms eqs)]
                  (every? (fn [[s t]]
                            (or (not= (rep-find rep s) (rep-find rep t))
-                               (= (id-of s) (id-of t))))
+                               (= (cg/id-of egraph s) (cg/id-of egraph t))))
                          (for [s terms, t terms] [s t])))))]
     (is (:pass? res) (pr-str res))))

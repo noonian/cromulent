@@ -22,6 +22,18 @@ leaves the old one intact.
 call `rebuild` before relying on congruence or the hashcons. `nodes`
 returns the canonical e-nodes of a class; `eclass` the class map.
 
+**Patterns** are terms with `?variables`; matching finds every class
+and binding where one occurs, and `instantiate` builds the other side:
+
+```clojure
+(require '[cromulent.pattern :as pat])
+
+(pat/ematch g '[:* ?a 2])
+;; => [{:class 2 :bindings {?a 0}}]        ; ids are e-class ids
+(pat/instantiate g '[:<< ?a 1] {'?a 0})
+;; => [g' 3]                              ; the class of a<<1, added if missing
+```
+
 An **e-class analysis** attaches lattice data to every class and may
 merge classes it proves equal:
 

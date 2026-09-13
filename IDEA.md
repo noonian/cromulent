@@ -108,6 +108,7 @@ not a map.
                    ;;                     :parents {e-node id ...}   ; parent e-node -> its class
                    ;;                     :data    any}             ; analysis data
                    ;;          nil for non-roots
+ :by-op    {}      ;; operator -> #{root ids} whose class holds a node with that operator
  :pending  #{}     ;; root ids whose parents need repair (the rebuild worklist)
  :analysis nil}    ;; an Analysis value, or nil
 ```
@@ -134,7 +135,11 @@ operation:
 5. `:pending` is empty.
 6. Analysis data of every class equals the join of `make` over its
    nodes.
-7. (Once scoped algorithms exist.) After a scope exit, every entry of
+7. `:by-op` maps each operator to exactly the set of roots whose class
+   holds a node with that operator. Unlike the others this one holds
+   at all times, not only after rebuild: `union` moves the smaller
+   class's operators to the new root as it merges.
+8. (Once scoped algorithms exist.) After a scope exit, every entry of
    `:uf` points directly at its root (fully compressed).
 
 Between `merge` and `rebuild` only 1 holds; that is the deferred
@@ -266,13 +271,18 @@ Patterns are terms containing pattern variables: symbols starting with
 '[:+ ?x [:* ?y ?z]]
 ```
 
-v1 is the backtracking matcher: to match pattern `p` against class
-`c`, for each e-node in `c` with the same operator and arity, match
-children pairwise, threading a bindings map `{?a id}`; a repeated
-variable must `find` to the same root. `(ematch eg pattern)` returns a
-vector of `{:class id :bindings {...}}` over every class. Later,
-by benchmark: precompiled patterns, per-operator indexes, and the
-relational e-matcher (Zhang et al. 2022). None changes the API.
+`cromulent.pattern`. The matcher is backtracking: candidate classes
+come from `:by-op` for the pattern's operator (a leaf pattern is a
+hashcons lookup; a bare variable matches every root); within a class,
+each node with the operator and arity is tried, children matched
+pairwise while threading a bindings map; a repeated variable must
+`find` to the same root. `(ematch g p)` returns a vector of
+`{:class root :bindings {?a root ...}}`; `(match-class g p id)` the
+bindings for one class. `(instantiate g p bindings)` goes the other
+way, returning `[g' id]`; it calls `add-node` as it walks rather than
+building a term, because a term with ids at its leaves would read as
+integer constants. Later, by benchmark: precompiled patterns and the
+relational e-matcher (Zhang et al. 2022). Neither changes the API.
 
 AC patterns (bag children, rest variables) are a matcher extension
 specified in ../design/ac-problem.md, not part of v1.
@@ -404,28 +414,39 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   every class's nodes and parents, and rebuilds the hashcons from the
   classes; that pass is the first thing to amortize when a benchmark
   says so.
+- `cromulent.pattern` — e-matching over the operator index and
+  `instantiate` (section 6).
 - `cromulent.check` — `violations` / `check!` over the invariants in
   section 3 (strict: after `rebuild`, memo keys, class nodes and parent
-  keys are all canonical and parent ids are roots).
+  keys are all canonical and parent ids are roots; the operator index
+  is exact).
 - Tests: the egg README example, cycles, persistence, constant folding
   (a flat lattice nil < number < :conflict, so contradictory scripts
   join to :conflict instead of throwing), and four test.check
   properties at 200 cases each over random add/union/rebuild scripts:
   invariants hold and rebuild is idempotent; the partition equals a
   naive reference congruence closure; the same with the analysis on;
-  and the analysed graph merges a superset of the reference.
+  and the analysed graph merges a superset of the reference. For
+  matching: the egg README pattern, repeated variables, ground and
+  bare-variable patterns, matching through a union, the index
+  following unions before rebuild, instantiate reusing existing
+  nodes; and three properties over random scripts and random
+  patterns: every match instantiates back to its class without adding
+  a node (soundness), every plain tree match over the ground terms is
+  reported (completeness), and no match is reported twice.
 - `bench/` — three fixtures, deterministic across runtimes (identical
   node and class counts):
 
   | fixture | n | JVM | Jolt |
   |---|---|---|---|
-  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 214 ms | 390 ms |
-  | union + rebuild (random unions on the above) | 2 000 | 114 ms | 163 ms |
-  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 11 ms | 27 ms |
+  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 208 ms | 469 ms |
+  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 48 ms | 77 ms |
+  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 20 ms | 44 ms |
+  | union + rebuild (random unions on the above) | 2 000 | 109 ms | 162 ms |
+  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 12 ms | 29 ms |
 
   JVM numbers include JIT warm-up; neither is tuned. They are the
   baseline for every later optimization row.
 
-Not yet: e-matching (section 6), rewrites and the runner (7),
-extraction (8), `compose` for analyses (9), explanations, the AC
-experiments. CI workflow is written but the repository has no remote.
+Not yet: rewrites and the runner (7), extraction (8), `compose` for
+analyses (9), explanations, the AC experiments. CI workflow is written but the repository has no remote.

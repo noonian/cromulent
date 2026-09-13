@@ -14,6 +14,8 @@
     :size      vector, root id -> class size, for union by size
     :memo      canonical e-node -> class id (the hashcons)
     :classes   vector, root id -> class map, nil for non-roots
+    :by-op     operator -> set of root ids whose class holds a node with
+               that operator (the index e-matching starts from)
     :pending   set of root ids whose parents need repair
     :analysis  an analysis map or nil (see `egraph`)
 
@@ -23,7 +25,9 @@
 
   Between `union` and `rebuild` the hashcons, the parent maps and the
   class node sets may be stale; `rebuild` restores every invariant
-  (see cromulent.check). That deferral is what makes saturation fast."
+  (see cromulent.check). That deferral is what makes saturation fast.
+  `:by-op` is kept exact by `union` itself (it moves the smaller
+  class's operators), so it only ever names roots."
   (:refer-clojure :exclude [find])
   (:require [cromulent.term :as term]))
 
@@ -36,7 +40,7 @@
                 :modify (fn [eg id] eg)}       ; optional; may `add` and `union`"
   ([] (egraph {}))
   ([{:keys [analysis]}]
-   {:next-id 0 :uf [] :size [] :memo {} :classes [] :pending #{} :analysis analysis}))
+   {:next-id 0 :uf [] :size [] :memo {} :classes [] :by-op {} :pending #{} :analysis analysis}))
 
 (defn find
   "The canonical (root) id of the class containing id."
@@ -102,9 +106,10 @@
                    (update :memo assoc node id)
                    (update :classes conj {:id id :nodes #{node} :parents {} :data data}))
             eg (if (term/compound? node)
-                 (reduce (fn [eg c] (update-in eg [:classes c :parents] assoc node id))
-                         eg
-                         (term/children node))
+                 (-> (reduce (fn [eg c] (update-in eg [:classes c :parents] assoc node id))
+                             eg
+                             (term/children node))
+                     (update-in [:by-op (term/operator node)] (fnil conj #{}) id))
                  eg)]
         [(run-modify eg id) id]))))
 
@@ -133,7 +138,14 @@
             classes (:classes eg)
             ca (nth classes ra), cb (nth classes rb)
             join (get-in eg [:analysis :merge])
+            by-op (reduce (fn [idx node]
+                            (if (term/compound? node)
+                              (update idx (term/operator node) #(conj (disj (or % #{}) rb) ra))
+                              idx))
+                          (:by-op eg)
+                          (:nodes cb))
             eg (-> eg
+                   (assoc :by-op by-op)
                    (assoc-in [:uf rb] ra)
                    (assoc-in [:size ra] (+ (nth size ra) (nth size rb)))
                    (assoc-in [:classes ra] {:id ra

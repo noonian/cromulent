@@ -8,7 +8,7 @@
 (defn violations
   "Every broken invariant of g, as maps with a :type."
   [g]
-  (let [{:keys [next-id uf size memo classes pending analysis]} g
+  (let [{:keys [next-id uf size memo classes by-op pending analysis]} g
         ids (range next-id)
         roots (filter #(eg/root? g %) ids)
         cls #(nth classes %)]
@@ -47,6 +47,17 @@
                     child (term/children node)
                     :when (not (contains? (:parents (cls child)) node))]
                 {:type :missing-parent :node node :child child}))
+        (into (let [expected (reduce (fn [idx r]
+                                       (reduce (fn [idx node]
+                                                 (if (term/compound? node)
+                                                   (update idx (term/operator node) (fnil conj #{}) r)
+                                                   idx))
+                                               idx
+                                               (:nodes (cls r))))
+                                     {}
+                                     roots)]
+                (when (not= expected by-op)
+                  [{:type :by-op-index :expected expected :actual by-op}])))
         (into (when (seq pending)
                 [{:type :pending-not-empty :pending pending}]))
         (into (when analysis

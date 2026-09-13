@@ -79,9 +79,9 @@
 
 (def const-fold
   {:name :const-fold
-   :make (fn [g node]
+   :make (fn [g node _]
            (if (term/compound? node)
-             (let [ds (map #(:data (eg/eclass g %)) (term/children node))]
+             (let [ds (map #(eg/data g % :const-fold) (term/children node))]
                (cond
                  (some #{:conflict} ds) :conflict
                  (every? number? ds) (case (term/operator node)
@@ -91,14 +91,14 @@
                                        nil)
                  :else nil))
              (when (number? node) node)))
-   :merge (fn [a b]
+   :merge (fn [_ a b]
             (cond
               (nil? a) b
               (nil? b) a
               (= a b) a
               :else :conflict))
    :modify (fn [g id]
-             (let [d (:data (eg/eclass g id))]
+             (let [d (eg/data g id :const-fold)]
                (if (number? d)
                  (let [[g cid] (eg/add g d)]
                    (first (eg/union g id cid)))
@@ -112,8 +112,8 @@
         [g _]    (eg/union g zero one)
         g (eg/rebuild g)]
     (ok? g)
-    (is (= :conflict (:data (eg/eclass g zero))))
-    (is (= :conflict (:data (eg/eclass g s))) "conflict propagates to parents")))
+    (is (= :conflict (eg/data g zero :const-fold)))
+    (is (= :conflict (eg/data g s :const-fold)) "conflict propagates to parents")))
 
 (deftest constant-folding
   (let [g (eg/egraph {:analysis const-fold})
@@ -122,7 +122,7 @@
         [g seven] (eg/add g 7)]
     (ok? g)
     (is (= (eg/find g r) (eg/find g seven)) "1 + 2*3 lands in the class of 7")
-    (is (= 7 (:data (eg/eclass g r))))))
+    (is (= 7 (eg/data g r :const-fold)))))
 
 (deftest constant-folding-through-union
   ;; x*2 is added first; only later is x asserted equal to 3
@@ -134,8 +134,8 @@
         g (eg/rebuild g)
         [g six] (eg/add g 6)]
     (ok? g)
-    (is (= 3 (:data (eg/eclass g x))))
-    (is (= 6 (:data (eg/eclass g x2))))
+    (is (= 3 (eg/data g x :const-fold)))
+    (is (= 6 (eg/data g x2 :const-fold)))
     (is (= (eg/find g x2) (eg/find g six)) "the parent folds once its child is known")))
 
 ;; ---------------------------------------------------------------------------
@@ -215,4 +215,53 @@
                            (or (not= (rep-find rep s) (rep-find rep t))
                                (= (cg/id-of egraph s) (cg/id-of egraph t))))
                          (for [s terms, t terms] [s t])))))]
+    (is (:pass? res) (pr-str res))))
+
+;; ---------------------------------------------------------------------------
+;; several analyses side by side
+
+(def has-var?
+  "Does the class contain a term with a variable (a keyword leaf)?
+  A two-point lattice false < true."
+  {:name :has-var?
+   :make (fn [g node _]
+           (if (term/compound? node)
+             (boolean (some #(eg/data g % :has-var?) (term/children node)))
+             (keyword? node)))
+   :merge (fn [_ a b] (or a b))})
+
+(deftest analyses-compose
+  (let [g (eg/egraph {:analyses [const-fold has-var?]})
+        [g r] (eg/add g [:+ 1 [:* 2 3]])
+        [g x] (eg/add g [:+ :x 1])
+        g (eg/rebuild g)]
+    (ok? g)
+    (is (= {:const-fold 7 :has-var? false} (:data (eg/eclass g r))))
+    (is (= {:const-fold nil :has-var? true} (:data (eg/eclass g x))))
+    (is (= 7 (eg/data g r :const-fold)))
+    (let [[g _] (eg/union g x r)
+          g (eg/rebuild g)]
+      (ok? g)
+      (is (= {:const-fold 7 :has-var? true} (:data (eg/eclass g r))) "joins are per analysis"))))
+
+(deftest analysis-state-survives
+  ;; an analysis that counts its own modify calls in the e-graph value
+  (let [counter {:name :counter
+                 :make (fn [_ _ _] nil)
+                 :merge (fn [_ _ _] nil)
+                 :modify (fn [g _] (update-in g [:analysis-state :counter] (fnil inc 0)))}
+        g (eg/egraph {:analysis counter})
+        [g a] (eg/add g [:+ :x :y])
+        [g b] (eg/add g :z)
+        [g _] (eg/union g a b)
+        g (eg/rebuild g)]
+    (ok? g)
+    (is (pos? (get-in g [:analysis-state :counter])))))
+
+(deftest invariants-hold-with-two-analyses
+  (let [res (tc/quick-check
+             100
+             (prop/for-all [ops script-gen]
+               (let [g (:egraph (run-script (eg/egraph {:analyses [const-fold has-var?]}) ops))]
+                 (empty? (check/violations g)))))]
     (is (:pass? res) (pr-str res))))

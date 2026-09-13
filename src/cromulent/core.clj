@@ -19,14 +19,18 @@
     :pending   vector of [parent-node class-id] entries whose parent
                node must be re-keyed in the hashcons (a worklist)
     :analysis-pending
-               vector of [parent-node class-id] entries whose class's
-               analysis data must be refreshed (a worklist)
+               vector of class ids whose analysis data must be
+               recomputed from their nodes (a worklist)
     :dirty?    true once a union has happened since the last rebuild
-    :analysis  an analysis map or nil (see `egraph`)
+    :analyses  a vector of analysis maps (see `egraph`), possibly empty
+    :analysis-state
+               map, analysis name -> whatever that analysis keeps
+               (an index, say); the core never touches it
 
   A class map is {:id :nodes :parents :data}: the e-nodes of the
   class, a map of parent e-node -> class id for every e-node that has
-  this class as a child, and the analysis data.
+  this class as a child, and the analysis data, a map from analysis
+  name to that analysis's data for the class.
 
   Between `union` and `rebuild` the hashcons, the parent maps and the
   class node sets may be stale; `rebuild` restores every invariant
@@ -37,16 +41,36 @@
   (:require [cromulent.term :as term]))
 
 (defn egraph
-  "An empty e-graph. Options:
+  "An empty e-graph. Options: :analyses, a vector of analyses (or
+  :analysis, one), each
 
-    :analysis  {:name   k
-                :make   (fn [eg e-node] data)  ; children are canonical; read their data with `eclass`
-                :merge  (fn [a b] data)        ; lattice join: associative, commutative, idempotent
-                :modify (fn [eg id] eg)}       ; optional; may `add` and `union`"
+    {:name   k
+     :make   (fn [eg e-node id] data)  ; the node's data; id is the class it is (or will be) in;
+                                       ; children are canonical, read their data with `data`
+     :merge  (fn [eg a b] data)        ; semilattice join of two data for one class:
+                                       ; associative, commutative, idempotent; sees eg so it
+                                       ; can canonicalize ids it stored
+     :modify (fn [eg id] eg)           ; optional; may `add`, `union`, and keep state under
+                                       ; [:analysis-state name]
+     :reconcile (fn [eg id datas] eg)} ; optional; called with the data that met in class id:
+                                       ; the two sides of a union, or the class's old data and
+                                       ; every node's data at a recompute; may `add` and `union`
+
+  A class's data under an analysis is closed under joining make over
+  the class's canonical nodes: `union` joins provisionally and
+  `rebuild` recomputes every class whose nodes or children changed,
+  joining what the nodes now say into what the class had, so data
+  that mentions class ids (as bendix's polynomials do) is refreshed
+  when those ids stop being roots. The join's order must be
+  well-founded (no infinite descending chains), which is what makes
+  rebuild terminate; `rebuild` asserts it with a round limit and
+  throws rather than spin if an analysis breaks it."
   ([] (egraph {}))
-  ([{:keys [analysis]}]
+  ([{:keys [analysis analyses]}]
    {:next-id 0 :uf [] :size [] :memo {} :classes [] :by-op {}
-    :pending [] :analysis-pending [] :dirty? false :analysis analysis}))
+    :pending [] :analysis-pending [] :dirty? false
+    :analyses (vec (concat (when analysis [analysis]) analyses))
+    :analysis-state {}}))
 
 (defn find
   "The canonical (root) id of the class containing id."
@@ -83,6 +107,11 @@
 
 (defn class-count [eg] (count (roots eg)))
 
+(defn data
+  "The data of analysis name for the class containing id."
+  [eg id name]
+  (get (:data (eclass eg id)) name))
+
 (defn node-count
   "Number of distinct e-nodes. Exact after `rebuild`."
   [eg]
@@ -91,14 +120,43 @@
 (declare union)
 
 (defn- run-modify [eg id]
-  (if-let [modify (get-in eg [:analysis :modify])]
-    (modify eg id)
-    eg))
+  (reduce (fn [eg a] (if-let [modify (:modify a)] (modify eg id) eg))
+          eg
+          (:analyses eg)))
+
+(defn- run-reconcile
+  "Hand each analysis that reconciles the data maps that met in class id."
+  [eg id datas]
+  (reduce (fn [eg a]
+            (if-let [reconcile (:reconcile a)]
+              (reconcile eg id (map #(get % (:name a)) datas))
+              eg))
+          eg
+          (:analyses eg)))
+
+(defn- make-all
+  "Data map for one node in class id."
+  [eg node id]
+  (reduce (fn [m a] (assoc m (:name a) ((:make a) eg node id))) {} (:analyses eg)))
+
+(defn- merge-all
+  "Join of two data maps."
+  [eg da db]
+  (reduce (fn [m a]
+            (let [k (:name a)]
+              (assoc m k ((:merge a) eg (get da k) (get db k)))))
+          {}
+          (:analyses eg)))
 
 (defn- push-parents
   "worklist with every [parent-node class-id] entry of parents appended."
   [worklist parents]
   (reduce-kv (fn [w p pid] (conj w [p pid])) worklist parents))
+
+(defn- push-parent-classes
+  "worklist with the class id of every parent appended."
+  [worklist parents]
+  (reduce-kv (fn [w _ pid] (conj w pid)) worklist parents))
 
 (defn add-node
   "Add one e-node whose children are class ids. Returns [eg' id]. The
@@ -109,7 +167,7 @@
     (if-let [id (get (:memo eg) node)]
       [eg (find eg id)]
       (let [id (:next-id eg)
-            data (when-let [make (get-in eg [:analysis :make])] (make eg node))
+            data (make-all eg node id)
             eg (-> eg
                    (assoc :next-id (inc id))
                    (update :uf conj id)
@@ -155,8 +213,7 @@
             [ra rb] (if (< (nth size ra) (nth size rb)) [rb ra] [ra rb])
             classes (:classes eg)
             ca (nth classes ra), cb (nth classes rb)
-            analysis (:analysis eg)
-            data (when analysis ((:merge analysis) (:data ca) (:data cb)))
+            analyses? (seq (:analyses eg))
             by-op (reduce (fn [idx node]
                             (if (term/compound? node)
                               (update idx (term/operator node) #(conj (disj (or % #{}) rb) ra))
@@ -167,17 +224,21 @@
                    (assoc :by-op by-op)
                    (assoc-in [:uf rb] ra)
                    (assoc-in [:size ra] (+ (nth size ra) (nth size rb)))
-                   (assoc-in [:classes ra] {:id ra
-                                            :nodes (merge-into (:nodes ca) (:nodes cb))
-                                            :parents (merge-into (:parents ca) (:parents cb))
-                                            :data data})
                    (assoc-in [:classes rb] nil)
                    (assoc :dirty? true)
                    (update :pending push-parents (:parents cb)))
-            eg (if analysis
-                 (cond-> eg
-                   (not= data (:data ca)) (update :analysis-pending push-parents (:parents ca))
-                   (not= data (:data cb)) (update :analysis-pending push-parents (:parents cb)))
+            ;; the join is provisional: rebuild recomputes the merged class
+            ;; from its nodes, and every parent whose child's data changed
+            data (when analyses? (merge-all eg (:data ca) (:data cb)))
+            eg (assoc-in eg [:classes ra] {:id ra
+                                           :nodes (merge-into (:nodes ca) (:nodes cb))
+                                           :parents (merge-into (:parents ca) (:parents cb))
+                                           :data data})
+            eg (if analyses?
+                 (-> (cond-> (update eg :analysis-pending conj ra)
+                       (not= data (:data ca)) (update :analysis-pending push-parent-classes (:parents ca))
+                       (not= data (:data cb)) (update :analysis-pending push-parent-classes (:parents cb)))
+                     (run-reconcile ra [(:data ca) (:data cb)]))
                  eg)]
         [(run-modify eg ra) ra]))))
 
@@ -204,28 +265,43 @@
                           [eg root])]
           (recur (update eg :memo assoc p' root)))))))
 
+(defn- recompute
+  "Join what the class of c's canonical nodes now say into its data.
+  Hand the old data and every node's data to the analyses that
+  reconcile. When the join changed the data: store it, queue the
+  class's parents, run modify."
+  [eg c]
+  (let [r (find eg c)
+        cls (nth (:classes eg) r)
+        old (:data cls)
+        datas (mapv #(make-all eg (canonicalize eg %) r) (:nodes cls))
+        new (reduce #(merge-all eg %1 %2) old datas)
+        changed? (not= old new)
+        eg (if changed?
+             (-> eg
+                 (assoc-in [:classes r :data] new)
+                 (update :analysis-pending push-parent-classes (:parents cls)))
+             eg)
+        eg (run-reconcile eg r (cons old datas))]
+    (if changed? (run-modify eg r) eg)))
+
 (defn- process-analysis-pending
-  "Drain the analysis worklist: re-make each queued parent node and
-  join the result into its class's data; when that changes the data,
-  queue the class's parents and run modify."
+  "Drain the analysis worklist in rounds: recompute every queued class
+  once per round; the classes their changes affect form the next
+  round. A round that changes nothing ends the loop. Every round
+  strictly descends some class's data in its analysis's order, so a
+  well-founded order guarantees the loop ends; the round limit turns
+  an analysis that breaks that into an exception instead of a hang."
   [eg]
-  (let [{:keys [make merge]} (:analysis eg)]
-    (loop [eg eg]
-      (let [pending (:analysis-pending eg)]
-        (if (empty? pending)
-          eg
-          (let [[p pid] (peek pending)
-                eg (assoc eg :analysis-pending (pop pending))
-                root (find eg pid)
-                cls (nth (:classes eg) root)
-                old (:data cls)
-                new (merge old (make eg (canonicalize eg p)))]
-            (recur (if (= old new)
-                     eg
-                     (-> eg
-                         (assoc-in [:classes root :data] new)
-                         (update :analysis-pending push-parents (:parents cls))
-                         (run-modify root))))))))))
+  (let [limit (+ 1000 (* 16 (:next-id eg)))]
+    (loop [eg eg, rounds 0]
+      (let [todo (into #{} (map #(find eg %)) (:analysis-pending eg))]
+        (cond
+          (empty? todo) eg
+          (> rounds limit) (throw (ex-info "analysis did not converge: its join is not well-founded"
+                                           {:rounds rounds :classes todo
+                                            :data (into {} (map (fn [c] [c (:data (nth (:classes eg) c))])) todo)}))
+          :else (recur (reduce recompute (assoc eg :analysis-pending []) todo) (inc rounds)))))))
 
 (defn- compress-and-canonicalize
   "Once the worklists are empty: point every id straight at its root,

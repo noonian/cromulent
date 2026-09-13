@@ -135,8 +135,10 @@ operation:
 4. For every class `c` and every `[p pid]` in `(:parents c)`, `p`
    mentions `c` as a child and `(find pid)` is the class containing `p`.
 5. `:pending` and `:analysis-pending` are empty and `:dirty?` is false.
-6. Analysis data of every class equals the join of `make` over its
-   nodes.
+6. Analysis data of every class is closed under joining `make` over
+   its nodes: joining what the nodes say changes nothing. For a
+   lattice of finite height that is equality with the join; for
+   bendix's polynomial order it is "the smallest form ever derived".
 7. `:by-op` maps each operator to exactly the set of roots whose class
    holds a node with that operator. Unlike the others this one holds
    at all times, not only after rebuild: `union` moves the smaller
@@ -346,6 +348,15 @@ so the AC experiments can bring their own. Backoff is not our answer
 to AC; it is the baseline the AC experiments (../design/ac-problem.md)
 are measured against.
 
+`:lhs` may be a *searcher* `(fn [eg] [{:class id :bindings {...}}])`
+in place of a pattern, egg's `Searcher` as a function; a pattern is
+the default searcher. This is what bendix's normal-form rules use
+(../bendix/IDEA.md section 3). A `:check` option, `(fn [g]
+problem-or-nil)`, is a dev-mode oracle: after each rule's
+applications the runner rebuilds and runs it, and a problem throws
+naming the rule. Any exception raised while applying a rule is
+rethrown with the rule's name and the match in its data.
+
 Decided in the implementation: a computed `:rhs` returns a pattern,
 instantiated under the match's bindings, or nil to decline the match.
 The guard and a computed `:rhs` see the e-graph the iteration's
@@ -368,32 +379,58 @@ vector indexed by class id: iterate until no class's best cost
 changes; a node whose child has no cost yet is skipped, which is why
 cycles (`x = x + 0`) are harmless. Then rebuild the term top-down from each class's best node.
 `extractor` returns a function of a class id that shares one cost
-table across many extractions; `yoink` is `extract`'s alias. The cost
+table across many extractions; `yoink` is `extract`'s alias. Ties
+between equal-cost nodes go to the smaller node under
+`cromulent.term/compare-nodes`, a total order that is the same on
+both runtimes, so extraction is a function of the e-graph value. The cost
 function must be monotone (a node costs strictly more than any child)
 or a cyclic node can be chosen. bendix supplies cost functions that
-encode taste (../design/bendix.md); the core guarantees the minimum.
+encode taste (../bendix/IDEA.md); the core guarantees the minimum.
 
 ## 9. E-class analyses
 
-Egg's mechanism, as a map of functions so analyses compose as data:
+Egg's mechanism, as maps of functions so analyses are data; an
+e-graph carries a vector of them and every class's `:data` is a map
+keyed by analysis name:
 
 ```clojure
 {:name   :const-fold
- :make   (fn [eg e-node] data)        ;; children canonical; may read their :data
- :merge  (fn [a b] data)              ;; lattice join: associative, commutative, idempotent
- :modify (fn [eg id] eg)}             ;; may add nodes / union, e.g. add the folded constant
+ :make   (fn [eg e-node id] data)     ;; the node's data; id is the class it is (or will be) in;
+                                      ;; children canonical, read them with (data eg child name)
+ :merge  (fn [eg a b] data)           ;; semilattice join: associative, commutative, idempotent;
+                                      ;; sees eg so it can canonicalize ids it stored
+ :modify (fn [eg id] eg)              ;; may add nodes / union; may keep state under
+                                      ;; [:analysis-state name] in the e-graph value
+ :reconcile (fn [eg id datas] eg)}    ;; optional: the data that met in the class (the two sides
+                                      ;; of a union; the old data and every node's at a recompute);
+                                      ;; may add / union. bendix solves equations here.
+(egraph {:analyses [a b]})            ;; run together; (data eg id :const-fold)
 ```
 
-Several analyses run together via `(compose a b c)`, whose data is a
-map keyed by `:name`. The lattice discipline is the whole correctness
-story: `merge` must be a join and `make` monotone in the children's
-data, or rebuild may not terminate. Tests check this on random
-e-graphs. Analyses read the e-graph only through the public read API,
-so a later scoped rebuild can hand them a working copy unchanged.
+The contract that makes this work for data mentioning class ids
+(bendix's polynomials name opaque classes by id): a class's data is
+closed under joining `make` over its canonical nodes. `union` joins
+the two sides provisionally and queues the merged class and, when
+either side's data changed, that side's parents; `rebuild` then
+recomputes in rounds, joining what each queued class's nodes now say
+into what it had and queueing its parents when that changes. Ids in
+data go stale when classes merge, so `make` and `merge` canonicalize
+them through `find` and the recompute refreshes every class affected.
+Termination: every recompute round strictly descends some class's
+data in its analysis's order, so the join's order must be
+well-founded, with no infinite descending chains. A lattice of finite
+height is; bendix's total order on polynomials is because it compares
+term counts, degrees and coefficient *sizes* before anything else, so
+only finitely many polynomials lie below any given one. `rebuild`
+asserts this with a generous round limit and throws with the
+offending classes rather than spin. Tests check the invariant on
+random e-graphs.
+Analyses read the e-graph only through the public read API, so a later
+scoped rebuild can hand them a working copy unchanged.
 
 **Analysis-driven merging** (`:modify` unioning two classes whose data
 proves them equal) is how the CAS brings decision procedures into the
-e-graph (../design/bendix.md, ../design/ac-problem.md approach C).
+e-graph (../bendix/IDEA.md, ../design/ac-problem.md approach C).
 Constant folding is the degenerate case.
 
 ## 10. Testing
@@ -439,35 +476,42 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
 
 - `cromulent.term` — the representation seam (tagged vectors).
 - `cromulent.core` — the persistent e-graph value: `egraph`, `add`,
-  `add-node`, `find`, `union`, `rebuild`, `eclass`, `nodes`, `roots`,
-  `class-count`, `node-count`, `canonicalize`; e-class analyses with
-  `:make`/`:merge`/`:modify`, run at `add-node`, `union`, and during
-  rebuild. Plain persistent Clojure throughout, as decided: no
-  transients, no arrays. `rebuild` drains the two parent-entry
-  worklists of section 4 and then runs one linear pass that
-  compresses every union-find path, canonicalizes every class's nodes
-  and parents, and rebuilds the hashcons from the classes; that pass
-  is the first thing to amortize when a benchmark says so.
+  `add-node`, `find`, `union`, `rebuild`, `eclass`, `nodes`, `data`,
+  `roots`, `class-count`, `node-count`, `canonicalize`; several
+  e-class analyses per e-graph under the section 9 contract
+  (`make` with the class id, `merge` with the e-graph, data maps keyed
+  by name, analysis-owned state, recompute on change).
+  Plain persistent Clojure throughout, as decided: no transients, no
+  arrays. `rebuild` drains the parent-entry congruence worklist and
+  the class-level analysis worklist of section 4 and then runs one
+  linear pass that compresses every union-find path, canonicalizes
+  every class's nodes and parents, and rebuilds the hashcons from the
+  classes; that pass is the first thing to amortize when a benchmark
+  says so.
 - `cromulent.pattern` — e-matching over the operator index and
   `instantiate` (section 6).
-- `cromulent.rewrite` — rules as data (`rule`, `bidirectional`),
-  `embiggen`/`saturate` with the `:simple` and `:backoff` schedulers
-  or a caller-supplied one, iteration/node/time limits, per-iteration
-  stats with phase timings, optional timeline (section 7).
+- `cromulent.rewrite` — rules as data (`rule`, `bidirectional`) with
+  pattern or searcher left-hand sides, `embiggen`/`saturate` with the
+  `:simple` and `:backoff` schedulers or a caller-supplied one,
+  iteration/node/time limits, per-iteration stats with phase timings,
+  optional timeline, the `:check` dev-mode oracle, failures that name
+  the rule (section 7).
 - `cromulent.extract` — `best-costs`, `extract`/`yoink`, `extractor`,
-  `ast-size` (section 8).
+  `ast-size`, deterministic ties (section 8).
 - `cromulent.check` — `violations` / `check!` over the invariants in
   section 3 (strict: after `rebuild`, memo keys, class nodes and parent
   keys are all canonical and parent ids are roots; the operator index
   is exact; analysis data equals the join over the class's nodes).
-- Tests (40 tests, 133 assertions). Core: the egg README example,
+- Tests (45 tests, 149 assertions). Core: the egg README example,
   cycles, persistence, constant folding (a flat lattice nil < number <
   :conflict, so contradictory scripts join to :conflict instead of
-  throwing), and four test.check properties at 200 cases each over
-  random add/union/rebuild scripts: invariants hold and rebuild is
-  idempotent; the partition equals a naive reference congruence
-  closure; the same with the analysis on; the analysed graph merges a
-  superset of the reference. Matching: the egg README pattern,
+  throwing), two analyses side by side with per-analysis joins,
+  analysis state surviving in the value, and five test.check
+  properties over random add/union/rebuild scripts: invariants hold
+  and rebuild is idempotent; the partition equals a naive reference
+  congruence closure; the same with the analysis on; the analysed
+  graph merges a superset of the reference; invariants hold with two
+  analyses. Matching: the egg README pattern,
   repeated variables, ground and bare-variable patterns, matching
   through a union, the index following unions before rebuild,
   instantiate reusing nodes; and three properties: soundness,
@@ -477,7 +521,8 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   order, every limit, the sum-of-5 blowup matching the formula in
   ../design/ac-problem.md (31 classes, 180 compound nodes), backoff
   banning and recovering to the same e-graph as simple, timelines, a
-  custom scheduler; and four properties: random unsound rules over
+  custom scheduler, a searcher rule, failures naming the rule; and
+  four properties: random unsound rules over
   random scripts keep every invariant; sound integer identities
   (including two computed folding rules) preserve the value of every
   node of every class under random assignments, checked through
@@ -492,20 +537,20 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
 
   | fixture | n | JVM | Jolt |
   |---|---|---|---|
-  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 210 ms | 461 ms |
-  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 54 ms | 67 ms |
-  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 17 ms | 45 ms |
-  | union + rebuild (random unions on the above) | 2 000 | 118 ms | 147 ms |
-  | extract, cost table for every class of the above | 35 967 | 44 ms | 110 ms |
-  | embiggen, egg README rules on the above, 2 iterations (→ 45 282 nodes, 22 871 classes) | 2 | 829 ms | 2 277 ms |
-  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 8 ms | 28 ms |
-  | ac-sum, saturate a 7-atom sum under comm + assoc (127 classes, 1 939 nodes, 8 iterations) | 7 | 82 ms | 363 ms |
-  | ac-sum, the same with 8 atoms (255 classes, 6 058 nodes, 9 iterations) | 8 | 360 ms | 1 740 ms |
+  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 281 ms | 457 ms |
+  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 57 ms | 68 ms |
+  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 17 ms | 44 ms |
+  | union + rebuild (random unions on the above) | 2 000 | 114 ms | 151 ms |
+  | extract, cost table for every class of the above | 35 967 | 57 ms | 131 ms |
+  | embiggen, egg README rules on the above, 2 iterations (→ 45 282 nodes, 22 871 classes) | 2 | 844 ms | 2 280 ms |
+  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 9 ms | 27 ms |
+  | ac-sum, saturate a 7-atom sum under comm + assoc (127 classes, 1 939 nodes, 8 iterations) | 7 | 96 ms | 360 ms |
+  | ac-sum, the same with 8 atoms (255 classes, 6 058 nodes, 9 iterations) | 8 | 361 ms | 1 717 ms |
 
   The ac-sum rows are experiment 1 of ../design/ac-problem.md, the
   baseline. The embiggen row is where the class-level worklist was
   caught (section 4).
 
-Not yet: `compose` for analyses (9), explanations, the AC experiments
-beyond the baseline. CI workflow is written but the repository has no
+Not yet: explanations, relational e-matching, a scoped fast path; the
+AC experiments beyond 1–3 live in bendix. CI workflow is written but the repository has no
 remote.

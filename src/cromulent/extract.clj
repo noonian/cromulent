@@ -10,8 +10,10 @@
   `best-costs` is egg's Extractor: a bottom-up fixpoint over every
   class, costs in a vector indexed by class id, iterated until no
   class improves. A node whose child has no cost yet is skipped, which
-  is why cycles are harmless. `extract` (alias `yoink`) builds the
-  term top-down from each class's best node."
+  is why cycles are harmless. Ties go to the smaller node under
+  `cromulent.term/compare-nodes`, so extraction is a function of the
+  e-graph value alone, the same on every runtime. `extract` (alias
+  `yoink`) builds the term top-down from each class's best node."
   (:require [cromulent.core :as eg]
             [cromulent.term :as term]))
 
@@ -46,7 +48,12 @@
                            (let [cur (nth best i)
                                  b (reduce (fn [b node]
                                              (let [c (node-cost g best cost-fn node)]
-                                               (if (and c (or (nil? b) (< (:cost c) (:cost b)))) c b)))
+                                               (if (and c (or (nil? b)
+                                                              (< (:cost c) (:cost b))
+                                                              (and (= (:cost c) (:cost b))
+                                                                   (neg? (term/compare-nodes node (:node b))))))
+                                                 c
+                                                 b)))
                                            cur
                                            (:nodes cls))]
                              (if (identical? b cur)

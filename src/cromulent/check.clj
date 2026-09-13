@@ -8,7 +8,7 @@
 (defn violations
   "Every broken invariant of g, as maps with a :type."
   [g]
-  (let [{:keys [next-id uf size memo classes by-op pending analysis-pending dirty? analysis]} g
+  (let [{:keys [next-id uf size memo classes by-op pending analysis-pending dirty? analyses]} g
         ids (range next-id)
         roots (filter #(eg/root? g %) ids)
         cls #(nth classes %)]
@@ -60,13 +60,15 @@
                   [{:type :by-op-index :expected expected :actual by-op}])))
         (into (when (or dirty? (seq pending) (seq analysis-pending))
                 [{:type :pending-not-empty :dirty? dirty? :pending pending :analysis-pending analysis-pending}]))
-        (into (when analysis
-                (let [{:keys [make merge]} analysis]
-                  (for [r roots
-                        :let [c (cls r)
-                              expected (reduce merge (map #(make g %) (:nodes c)))]
-                        :when (not= expected (:data c))]
-                    {:type :stale-analysis :id r :expected expected :actual (:data c)})))))))
+        ;; data is closed under joining what the nodes say
+        (into (for [{:keys [name make merge]} analyses
+                    r roots
+                    :let [c (cls r)
+                          actual (get (:data c) name)
+                          expected (reduce #(merge g %1 %2) actual (map #(make g % r) (:nodes c)))]
+                    :when (not= expected actual)]
+                {:type :stale-analysis :analysis name :id r
+                 :expected expected :actual actual})))))
 
 (defn check!
   "g, or throws ex-info carrying the violations."

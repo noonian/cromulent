@@ -35,6 +35,29 @@
   [op children]
   (into [op] children))
 
+(defn- rank [x]
+  (cond (number? x) 0 (keyword? x) 1 (symbol? x) 2 (string? x) 3 (vector? x) 4 :else 5))
+
+(defn compare-nodes
+  "A total order on e-nodes and leaves that is the same on every
+  runtime: leaves before compound nodes, then by arity, then element
+  by element with numbers before keywords before symbols before
+  strings before vectors, and anything else by its printed form."
+  [a b]
+  (let [ra (rank a), rb (rank b)]
+    (cond
+      (not= ra rb) (compare ra rb)
+      (= 4 ra) (let [c (compare (count a) (count b))]
+                 (if (not= 0 c)
+                   c
+                   (loop [i 0]
+                     (if (= i (count a))
+                       0
+                       (let [c (compare-nodes (nth a i) (nth b i))]
+                         (if (not= 0 c) c (recur (inc i))))))))
+      (= 5 ra) (compare (pr-str a) (pr-str b))
+      :else (compare a b))))
+
 (defn map-children
   "Apply f to every child of a compound node; a leaf is returned as it
   is. Returns the very same node when no child changes."

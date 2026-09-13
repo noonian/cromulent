@@ -250,3 +250,30 @@
                       (= (eg/class-count (:egraph a)) (eg/class-count (:egraph b)))
                       (= (partition (:egraph a)) (partition (:egraph b)))))))]
     (is (:pass? res) (pr-str res))))
+
+(deftest searcher-rules
+  ;; a searcher finds matches by reading the e-graph directly: here,
+  ;; every class holding a number above 10 is rewritten to [:big]
+  (let [big (rw/rule "big"
+                     (fn [g]
+                       (into [] (keep (fn [r]
+                                        (when (some #(and (number? %) (> % 10)) (eg/nodes g r))
+                                          {:class r :bindings {}})))
+                             (eg/roots g)))
+                     [:big])
+        [g a] (eg/add (eg/egraph) [:+ 5 50])
+        {:keys [egraph stop-reason]} (rw/embiggen g [big])
+        fifty (second (eg/add egraph 50))
+        five (second (eg/add egraph 5))]
+    (ok? egraph)
+    (is (= :saturated stop-reason))
+    (is (= (eg/find egraph fifty) (cg/id-of egraph [:big])))
+    (is (not= (eg/find egraph five) (cg/id-of egraph [:big])))))
+
+(deftest failures-name-the-rule
+  (let [boom (rw/rule "boom" '[:+ ?a ?b] (fn [_ _] (throw (ex-info "no" {:why :test}))))
+        [g _] (eg/add (eg/egraph) [:+ 1 2])
+        e (try (rw/embiggen g [boom]) nil (catch Exception e e))]
+    (is (some? e))
+    (is (= "boom" (:rule (ex-data e))))
+    (is (= :test (:why (ex-data e))))))

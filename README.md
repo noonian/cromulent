@@ -71,14 +71,20 @@ functions are `(fn [e-node child-costs] number)`; `ex/extractor`
 shares one cost table across many extractions.
 
 An **e-class analysis** attaches lattice data to every class and may
-merge classes it proves equal:
+merge classes it proves equal; several run side by side, each under
+its own name:
 
 ```clojure
-(eg/egraph {:analysis {:name   :const-fold
-                       :make   (fn [g node] ...)   ; data for a new node, from its children's
-                       :merge  (fn [a b] ...)      ; lattice join
-                       :modify (fn [g id] ...)}})  ; optional; may add nodes and union
+(eg/egraph {:analyses [{:name   :const-fold
+                        :make   (fn [g node id] ...)   ; data for a node in class id, from
+                                                       ; its children's (eg/data g child :const-fold)
+                        :merge  (fn [g a b] ...)       ; semilattice join
+                        :modify (fn [g id] ...)        ; optional; may add nodes and union
+                        :reconcile (fn [g id datas] ...)}]}) ; optional; sees the data that met
 ```
+
+A class's data is always the join of `make` over its nodes; `rebuild`
+recomputes whatever a union or a child's change affected.
 
 See `test/cromulent/core_test.clj` for a complete constant-folding
 analysis, and `cromulent.check/violations` for the invariants a

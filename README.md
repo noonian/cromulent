@@ -34,6 +34,42 @@ and binding where one occurs, and `instantiate` builds the other side:
 ;; => [g' 3]                              ; the class of a<<1, added if missing
 ```
 
+**Rewrites** are data, and `embiggen` (alias `saturate`) runs them to
+a fixpoint or a limit; `extract` (alias `yoink`) then pulls the
+cheapest term out of a class:
+
+```clojure
+(require '[cromulent.rewrite :as rw] '[cromulent.extract :as ex])
+
+(defn constant-in [g id] (some #(when (number? %) %) (eg/nodes g id)))
+
+(def rules [(rw/rule "commute-add" '[:+ ?a ?b] '[:+ ?b ?a])
+            (rw/rule "commute-mul" '[:* ?a ?b] '[:* ?b ?a])
+            (rw/rule "add-0"       '[:+ ?a 0]  '?a)
+            (rw/rule "mul-1"       '[:* ?a 1]  '?a)
+            (rw/rule "fold"        '[:+ ?a ?b]                    ; a computed right-hand side:
+                     (fn [g {:syms [?a ?b]}]                      ; a pattern, or nil to decline
+                       (let [x (constant-in g ?a), y (constant-in g ?b)]
+                         (when (and x y) (+ x y)))))
+            (rw/rule "div-self"    '[:/ ?a ?a] 1
+                     :when (fn [g {:syms [?a]}] (not= 0 (constant-in g ?a))))])
+
+(let [[g r] (eg/add (eg/egraph) [:+ 0 [:* 1 :a]])
+      {:keys [egraph stop-reason iterations stats]} (rw/embiggen g rules {:iter-limit 30 :node-limit 10000})]
+  [stop-reason iterations (ex/extract egraph r)])
+;; => [:saturated 3 {:cost 1 :term :a}]
+```
+
+Each iteration searches every rule against the same e-graph, applies
+every match, then rebuilds, so the result does not depend on rule
+order. Guards and computed right-hand sides see the e-graph the
+search ran on. The default scheduler is egg's backoff (`:scheduler
+:simple` applies everything, every iteration); `:stats` has per-rule
+match and application counts and phase timings for every iteration,
+and `:timeline? true` keeps every intermediate e-graph. Cost
+functions are `(fn [e-node child-costs] number)`; `ex/extractor`
+shares one cost table across many extractions.
+
 An **e-class analysis** attaches lattice data to every class and may
 merge classes it proves equal:
 

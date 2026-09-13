@@ -59,3 +59,49 @@
   "The root id of ground term t in a rebuilt g (adds nothing new)."
   [g t]
   (eg/find g (second (eg/add g t))))
+
+;; ---------------------------------------------------------------------------
+;; for the runner and extraction tests
+
+(def terms-gen
+  "A handful of random terms to add: an add-only script, so no
+  contradictory equalities are asserted."
+  (gen/vector term-gen 1 12))
+
+(defn add-terms
+  "Add every term of ts to g. Returns {:egraph g :terms #{...}} rebuilt."
+  [g ts]
+  {:egraph (eg/rebuild (reduce (fn [g t] (first (eg/add g t))) g ts))
+   :terms (into #{} (mapcat subterms) ts)})
+
+(def rule-gen
+  "A random rewrite: a random pattern lhs and an rhs whose variables
+  are drawn from the lhs, so the rule is well-formed. Not sound."
+  (gen/bind pattern-gen
+            (fn [lhs]
+              (let [vs (into #{} (filter symbol?) (subterms lhs))]
+                (gen/fmap (fn [rhs] {:lhs lhs :rhs rhs})
+                          (term-gen-with (gen/elements (into [:a :b 0 1] vs))))))))
+
+(def rules-gen
+  "One to four random rules with distinct names."
+  (gen/fmap (fn [rs] (vec (map-indexed (fn [i r] (assoc r :name (str "r" i))) rs)))
+            (gen/vector rule-gen 1 4)))
+
+(defn evaluate
+  "The integer value of ground term t under env, a map of keyword -> number."
+  [t env]
+  (cond
+    (term/compound? t)
+    (let [vs (map #(evaluate % env) (term/children t))]
+      (case (term/operator t)
+        :+ (reduce + vs)
+        :* (reduce * vs)
+        :neg (- (first vs))))
+    (keyword? t) (get env t)
+    :else t))
+
+(defn size
+  "Number of nodes in term t."
+  [t]
+  (count (subterms t)))

@@ -109,7 +109,9 @@ not a map.
                    ;;                     :data    any}             ; analysis data
                    ;;          nil for non-roots
  :by-op    {}      ;; operator -> #{root ids} whose class holds a node with that operator
- :pending  #{}     ;; root ids whose parents need repair (the rebuild worklist)
+ :pending  []      ;; [parent-node class-id] entries to re-key in :memo (the rebuild worklist)
+ :analysis-pending []  ;; [parent-node class-id] entries whose class data must be re-made
+ :dirty?   false   ;; a union has happened since the last rebuild
  :analysis nil}    ;; an Analysis value, or nil
 ```
 
@@ -132,7 +134,7 @@ operation:
    closure.)
 4. For every class `c` and every `[p pid]` in `(:parents c)`, `p`
    mentions `c` as a child and `(find pid)` is the class containing `p`.
-5. `:pending` is empty.
+5. `:pending` and `:analysis-pending` are empty and `:dirty?` is false.
 6. Analysis data of every class equals the join of `make` over its
    nodes.
 7. `:by-op` maps each operator to exactly the set of roots whose class
@@ -154,7 +156,7 @@ All are pure. Operations that allocate an id return a pair.
 (add eg term)      -> [eg' id]   ;; whole term, hashconsed bottom-up
 (add-node eg node) -> [eg' id]   ;; one e-node with child ids
 (find eg id)       -> root-id
-(merge eg a b)     -> [eg' root] ;; union by size; records root in :pending
+(merge eg a b)     -> [eg' root] ;; union by size; queues the smaller class's parents in :pending
 (rebuild eg)       -> eg'        ;; restore invariants 2..7
 (class eg id)      -> class map
 (nodes eg id)      -> #{canonical e-nodes of the class}
@@ -169,26 +171,45 @@ anyway. The data model is shaped so that the batch algorithms
 each later move inside a **scope** with mutable tables (section 5),
 one at a time, when a benchmark says that one is the bottleneck.
 
-**Rebuild** is egg's algorithm:
+**Rebuild** is egg's algorithm in its later, entry-granular form
+(egg 0.9's `process_unions`): the worklists hold parent *entries*
+`[parent-node class-id]`, not classes.
 
 ```
-loop while pending non-empty
-  todo := distinct roots of pending ; pending := empty
-  for c in todo: repair c
-repair c
-  for [p pid] in parents(c)
-    remove (old canonical p) from memo
-    p' := canonicalize p ; root := find pid
-    if memo has p' -> other  then union other root   ; adds to pending
-    else memo[p'] := root
-  dedupe parents(c) by canonical form, unioning any classes whose
-    parent nodes collided
-  for each distinct parent class: re-make analysis data; if it changed,
-    add that class to pending, then run (:modify analysis)
+union a b
+  root := the larger class (by size); queue every parent entry of the
+  smaller class on pending; if the joined analysis data differs from
+  either side's old data, queue that side's parents on analysis-pending
+rebuild
+  loop while pending or analysis-pending non-empty
+    while pending non-empty
+      pop [p pid]; p' := canonicalize p ; root := find pid
+      if memo has p' -> other and find other ≠ root: union other root  ; queues more
+      memo[p'] := root
+    while analysis-pending non-empty
+      pop [p pid]; root := find pid
+      d := merge(data root, make(canonicalize p))
+      if d ≠ data root: data root := d; queue parents(root); modify root
+  one linear pass: point every id at its root, canonicalize every
+  class's nodes and parents, rebuild memo from the classes
 ```
+
+Why entries and not classes: the first version queued *classes* and
+re-processed every parent of a queued class. When many queued classes
+are merged into one big one during the same round, that big class is
+repaired once per queued member. On the runner's first benchmark (the
+egg README rules over 36 000 random nodes) the class of the leaf `0`,
+with 7 700 parents, was repaired hundreds of times: 7.5 million
+parent visits for 105 000 distinct entries, 5.1 s for one iteration
+on the JVM. Entries are visited once each; with union by size an entry
+is re-queued at most log n times over the life of the e-graph, so
+rebuild is O(P log n) in the number of parent entries. The same
+iteration now takes 0.4 s. Stale hashcons keys are left in place
+until the final pass rebuilds the table; a canonical lookup can never
+hit one, because a non-root id never becomes a root again.
 
 Termination: each union strictly reduces the number of roots; each
-repair either unions or converges. Same argument as egg.
+analysis change strictly climbs a finite lattice. Same argument as egg.
 
 ## 5. Persistence and performance
 
@@ -319,8 +340,21 @@ depend on rule order:
 
 Schedulers: `:simple` (everything, every iteration) and `:backoff`
 (egg's: a rule that exceeds its match budget is banned for a doubling
-number of iterations). Backoff is not our answer to AC; it is the
-baseline the AC experiments (../design/ac-problem.md) are measured against.
+number of iterations; `:match-limit` 1000 and `:ban-length` 5 by
+default). A scheduler is a map `{:init :search :can-stop :report}`,
+so the AC experiments can bring their own. Backoff is not our answer
+to AC; it is the baseline the AC experiments (../design/ac-problem.md)
+are measured against.
+
+Decided in the implementation: a computed `:rhs` returns a pattern,
+instantiated under the match's bindings, or nil to decline the match.
+The guard and a computed `:rhs` see the e-graph the iteration's
+search ran on, not the one being built by the other applications, so
+an iteration's result is independent of rule and match order. A
+match counts as applied only when its union merged two classes;
+saturation is "nothing applied and the scheduler holds nothing back",
+and the scheduler is only asked when nothing was applied (that is when
+backoff releases a ban instead of stopping).
 
 ## 8. Extraction
 
@@ -333,8 +367,11 @@ size. Bottom-up fixpoint over all classes, egg's Extractor, costs in a
 vector indexed by class id: iterate until no class's best cost
 changes; a node whose child has no cost yet is skipped, which is why
 cycles (`x = x + 0`) are harmless. Then rebuild the term top-down from each class's best node.
-bendix supplies cost functions that encode taste (../design/bendix.md);
-the core guarantees the minimum.
+`extractor` returns a function of a class id that shares one cost
+table across many extractions; `yoink` is `extract`'s alias. The cost
+function must be monotone (a node costs strictly more than any child)
+or a cyclic node can be chosen. bendix supplies cost functions that
+encode taste (../design/bendix.md); the core guarantees the minimum.
 
 ## 9. E-class analyses
 
@@ -393,9 +430,6 @@ Constant folding is the degenerate case.
 - Should `:nodes` hold canonical or as-inserted e-nodes? egg keeps
   as-inserted and canonicalizes in repair. Decide with the invariant
   checker in hand.
-- Whether the `:when` guard sees the e-graph before or after the
-  iteration's other applications. Keep egg's answer (before) unless
-  the CAS needs otherwise.
 - Records vs maps on Jolt (measure).
 
 ## Status
@@ -409,44 +443,69 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   `class-count`, `node-count`, `canonicalize`; e-class analyses with
   `:make`/`:merge`/`:modify`, run at `add-node`, `union`, and during
   rebuild. Plain persistent Clojure throughout, as decided: no
-  transients, no arrays. `rebuild` is egg's worklist repair followed by
-  one linear pass that compresses every union-find path, canonicalizes
-  every class's nodes and parents, and rebuilds the hashcons from the
-  classes; that pass is the first thing to amortize when a benchmark
-  says so.
+  transients, no arrays. `rebuild` drains the two parent-entry
+  worklists of section 4 and then runs one linear pass that
+  compresses every union-find path, canonicalizes every class's nodes
+  and parents, and rebuilds the hashcons from the classes; that pass
+  is the first thing to amortize when a benchmark says so.
 - `cromulent.pattern` — e-matching over the operator index and
   `instantiate` (section 6).
+- `cromulent.rewrite` — rules as data (`rule`, `bidirectional`),
+  `embiggen`/`saturate` with the `:simple` and `:backoff` schedulers
+  or a caller-supplied one, iteration/node/time limits, per-iteration
+  stats with phase timings, optional timeline (section 7).
+- `cromulent.extract` — `best-costs`, `extract`/`yoink`, `extractor`,
+  `ast-size` (section 8).
 - `cromulent.check` — `violations` / `check!` over the invariants in
   section 3 (strict: after `rebuild`, memo keys, class nodes and parent
   keys are all canonical and parent ids are roots; the operator index
-  is exact).
-- Tests: the egg README example, cycles, persistence, constant folding
-  (a flat lattice nil < number < :conflict, so contradictory scripts
-  join to :conflict instead of throwing), and four test.check
-  properties at 200 cases each over random add/union/rebuild scripts:
-  invariants hold and rebuild is idempotent; the partition equals a
-  naive reference congruence closure; the same with the analysis on;
-  and the analysed graph merges a superset of the reference. For
-  matching: the egg README pattern, repeated variables, ground and
-  bare-variable patterns, matching through a union, the index
-  following unions before rebuild, instantiate reusing existing
-  nodes; and three properties over random scripts and random
-  patterns: every match instantiates back to its class without adding
-  a node (soundness), every plain tree match over the ground terms is
-  reported (completeness), and no match is reported twice.
-- `bench/` — three fixtures, deterministic across runtimes (identical
-  node and class counts):
+  is exact; analysis data equals the join over the class's nodes).
+- Tests (40 tests, 133 assertions). Core: the egg README example,
+  cycles, persistence, constant folding (a flat lattice nil < number <
+  :conflict, so contradictory scripts join to :conflict instead of
+  throwing), and four test.check properties at 200 cases each over
+  random add/union/rebuild scripts: invariants hold and rebuild is
+  idempotent; the partition equals a naive reference congruence
+  closure; the same with the analysis on; the analysed graph merges a
+  superset of the reference. Matching: the egg README pattern,
+  repeated variables, ground and bare-variable patterns, matching
+  through a union, the index following unions before rebuild,
+  instantiate reusing nodes; and three properties: soundness,
+  completeness against a tree matcher, no duplicates. Rewriting: the
+  egg README example under both schedulers, computed right-hand sides
+  and guards, guards seeing the search snapshot whatever the rule
+  order, every limit, the sum-of-5 blowup matching the formula in
+  ../design/ac-problem.md (31 classes, 180 compound nodes), backoff
+  banning and recovering to the same e-graph as simple, timelines, a
+  custom scheduler; and four properties: random unsound rules over
+  random scripts keep every invariant; sound integer identities
+  (including two computed folding rules) preserve the value of every
+  node of every class under random assignments, checked through
+  extraction; a saturated e-graph is closed under its rules and
+  saturates again in one quiet iteration; simple and backoff reach
+  the same e-graph whenever both saturate. Extraction: smallest term,
+  a cost function that prefers shifts, cycles, a shared table; and a
+  property that every class's extracted term is a member of the
+  class, costs its size, and is no larger than any input term there.
+- `bench/` — deterministic across runtimes (identical node and class
+  counts); JVM numbers include JIT warm-up; nothing is tuned:
 
   | fixture | n | JVM | Jolt |
   |---|---|---|---|
-  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 208 ms | 469 ms |
-  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 48 ms | 77 ms |
-  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 20 ms | 44 ms |
-  | union + rebuild (random unions on the above) | 2 000 | 109 ms | 162 ms |
-  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 12 ms | 29 ms |
+  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 210 ms | 461 ms |
+  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 54 ms | 67 ms |
+  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 17 ms | 45 ms |
+  | union + rebuild (random unions on the above) | 2 000 | 118 ms | 147 ms |
+  | extract, cost table for every class of the above | 35 967 | 44 ms | 110 ms |
+  | embiggen, egg README rules on the above, 2 iterations (→ 45 282 nodes, 22 871 classes) | 2 | 829 ms | 2 277 ms |
+  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 8 ms | 28 ms |
+  | ac-sum, saturate a 7-atom sum under comm + assoc (127 classes, 1 939 nodes, 8 iterations) | 7 | 82 ms | 363 ms |
+  | ac-sum, the same with 8 atoms (255 classes, 6 058 nodes, 9 iterations) | 8 | 360 ms | 1 740 ms |
 
-  JVM numbers include JIT warm-up; neither is tuned. They are the
-  baseline for every later optimization row.
+  The ac-sum rows are experiment 1 of ../design/ac-problem.md, the
+  baseline. The embiggen row is where the class-level worklist was
+  caught (section 4).
 
-Not yet: rewrites and the runner (7), extraction (8), `compose` for
-analyses (9), explanations, the AC experiments. CI workflow is written but the repository has no remote.
+Not yet: `compose` for analyses (9), explanations, the AC experiments
+beyond the baseline. CI workflow is written but the repository has no
+remote.

@@ -6,7 +6,9 @@
   Inputs come from a small LCG so both runtimes build identical
   e-graphs. Numbers are printed as a table; IDEA.md records them."
   (:require [cromulent.core :as eg]
-            [cromulent.pattern :as pat]))
+            [cromulent.extract :as ex]
+            [cromulent.pattern :as pat]
+            [cromulent.rewrite :as rw]))
 
 (defn- now-ms [] (/ (double (System/nanoTime)) 1e6))
 
@@ -74,8 +76,48 @@
     {:fixture (str "ematch " label) :n (count matches) :ms ms
      :nodes (eg/node-count g) :classes (eg/class-count g)}))
 
-(defn- row [{:keys [fixture n ms nodes classes]}]
-  (println (format "%-22s n=%-7d %8.1f ms   nodes=%-7d classes=%d" fixture n (double ms) nodes classes)))
+(def egg-rules
+  "The rule set of egg's README."
+  [(rw/rule "commute-add" '[:+ ?a ?b] '[:+ ?b ?a])
+   (rw/rule "commute-mul" '[:* ?a ?b] '[:* ?b ?a])
+   (rw/rule "add-0" '[:+ ?a 0] '?a)
+   (rw/rule "mul-0" '[:* ?a 0] 0)
+   (rw/rule "mul-1" '[:* ?a 1] '?a)])
+
+(def ac-rules
+  [(rw/rule "comm" '[:+ ?a ?b] '[:+ ?b ?a])
+   (rw/rule "assoc" '[:+ [:+ ?a ?b] ?c] '[:+ ?a [:+ ?b ?c]])])
+
+(defn embiggen
+  "Run rules on g under opts."
+  [g label rules opts]
+  (let [[ms res] (timed #(rw/embiggen g rules opts))
+        g (:egraph res)]
+    {:fixture (str "embiggen " label) :n (:iterations res) :ms ms
+     :nodes (eg/node-count g) :classes (eg/class-count g) :stop (:stop-reason res)}))
+
+(defn ac-sum
+  "Saturate a sum of n atoms under commutativity and associativity:
+  experiment 1 of ../design/ac-problem.md, the baseline the AC work
+  is measured against. Expect 2^n - 1 classes and 3^n - 2^(n+1) + 1 + n
+  nodes."
+  [n]
+  (let [atoms (mapv #(keyword (str "a" %)) (range n))
+        t (reduce (fn [acc a] [:+ acc a]) (first atoms) (rest atoms))
+        [g _] (eg/add (eg/egraph) t)]
+    (assoc (embiggen g (str "ac-sum " n) ac-rules {:scheduler :simple :node-limit 1000000 :time-limit-ms 600000})
+           :n n)))
+
+(defn extract
+  "Cost every class of g under ast-size."
+  [g]
+  (let [[ms best] (timed #(ex/best-costs g ex/ast-size))]
+    {:fixture "extract (all classes)" :n (count (remove nil? best)) :ms ms
+     :nodes (eg/node-count g) :classes (eg/class-count g)}))
+
+(defn- row [{:keys [fixture n ms nodes classes stop]}]
+  (println (format "%-24s n=%-7d %8.1f ms   nodes=%-7d classes=%-6d %s"
+                   fixture n (double ms) nodes classes (if stop (name stop) ""))))
 
 (defn -main [& _]
   (println "cromulent bench")
@@ -84,6 +126,10 @@
     (row a)
     (row (ematch g "[:+ ?a [:* ?b ?c]]" '[:+ ?a [:* ?b ?c]]))
     (row (ematch g "[:+ ?x ?x]" '[:+ ?x ?x]))
-    (row (union-rebuild g 2000)))
+    (row (union-rebuild g 2000))
+    (row (extract g))
+    (row (embiggen g "egg rules, 2 iters" egg-rules {:scheduler :simple :iter-limit 2 :node-limit 1000000})))
   (row (chain 2000))
+  (row (ac-sum 7))
+  (row (ac-sum 8))
   (System/exit 0))

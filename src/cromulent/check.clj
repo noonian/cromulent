@@ -8,7 +8,7 @@
 (defn violations
   "Every broken invariant of g, as maps with a :type."
   [g]
-  (let [{:keys [next-id uf size memo classes by-op pending analysis]} g
+  (let [{:keys [next-id uf size memo classes by-op pending analysis-pending dirty? analysis]} g
         ids (range next-id)
         roots (filter #(eg/root? g %) ids)
         cls #(nth classes %)]
@@ -58,8 +58,8 @@
                                      roots)]
                 (when (not= expected by-op)
                   [{:type :by-op-index :expected expected :actual by-op}])))
-        (into (when (seq pending)
-                [{:type :pending-not-empty :pending pending}]))
+        (into (when (or dirty? (seq pending) (seq analysis-pending))
+                [{:type :pending-not-empty :dirty? dirty? :pending pending :analysis-pending analysis-pending}]))
         (into (when analysis
                 (let [{:keys [make merge]} analysis]
                   (for [r roots

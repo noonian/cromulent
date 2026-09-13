@@ -18,6 +18,19 @@
 ;; ---------------------------------------------------------------------------
 ;; examples
 
+(deftest the-term-seam
+  (is (term/compound? [:+ 1 2]))
+  (is (not (term/compound? :a)))
+  (is (= :+ (term/operator [:+ 1 2])))
+  (is (= [1 2] (term/children [:+ 1 2])))
+  (is (= 2 (term/arity [:+ 1 2])))
+  (is (= 2 (term/child [:+ 1 2] 1)))
+  (is (= [:+ 1 2] (term/make :+ [1 2])))
+  (is (= [:+ 2 3] (term/map-children inc [:+ 1 2])))
+  (is (let [t [:+ 1 2]] (identical? t (term/map-children identity t)))
+      "unchanged children give back the very same node")
+  (is (= :a (term/map-children inc :a)) "a leaf is returned as it is"))
+
 (deftest add-is-hashconsed
   (let [g (eg/egraph)
         [g a] (eg/add g [:+ :x :y])

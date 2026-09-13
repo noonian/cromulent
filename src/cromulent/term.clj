@@ -30,6 +30,11 @@
   [t]
   (dec (count t)))
 
+(defn child
+  "The i-th child (from 0) of a compound node."
+  [t i]
+  (nth t (inc i)))
+
 (defn make
   "A compound node from an operator and a sequence of children."
   [op children]

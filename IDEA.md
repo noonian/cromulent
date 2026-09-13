@@ -477,7 +477,10 @@ Constant folding is the degenerate case.
 Implemented (2026-09-13), tests green on JVM (Clojure 1.12) and Jolt
 v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
 
-- `cromulent.term` — the representation seam (tagged vectors).
+- `cromulent.term` — the representation seam (tagged vectors):
+  `compound?`, `operator`, `children`, `child`, `arity`, `make`,
+  `map-children`, `compare-nodes`. bendix's own vocabulary (what a
+  leaf means) sits above it in `bendix.term`.
 - `cromulent.core` — the persistent e-graph value: `egraph`, `add`,
   `add-node`, `find`, `union`, `rebuild`, `eclass`, `nodes`, `data`,
   `roots`, `class-count`, `node-count`, `canonicalize`; several
@@ -506,7 +509,7 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   section 3 (strict: after `rebuild`, memo keys, class nodes and parent
   keys are all canonical and parent ids are roots; the operator index
   is exact; analysis data equals the join over the class's nodes).
-- Tests (46 tests, 155 assertions). Core: the egg README example,
+- Tests (47 tests, 165 assertions). Core: the egg README example,
   cycles, persistence, constant folding (a flat lattice nil < number <
   :conflict, so contradictory scripts join to :conflict instead of
   throwing), two analyses side by side with per-analysis joins,

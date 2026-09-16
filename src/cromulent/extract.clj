@@ -1,11 +1,14 @@
 (ns cromulent.extract
   "Extraction: the cheapest term an e-class represents.
 
-  A cost function is (fn [e-node child-costs] number), given a
+  A cost function is (fn [e-node child-costs] cost), given a
   canonical e-node and the best costs of its children in order; the
-  default `ast-size` counts nodes. It must be monotone: a node must
-  cost strictly more than any of its children, or a cycle such as
-  x = x + 0 could be chosen and the term would never bottom out.
+  default `ast-size` counts nodes. A cost is any value `compare`
+  orders: a number, or a vector for a lexicographic cost (bendix's
+  `no-D` counts derivative nodes before size). It must be monotone: a
+  node must cost strictly more than any of its children, or a cycle
+  such as x = x + 0 could be chosen and the term would never bottom
+  out.
 
   `best-costs` is egg's Extractor: a bottom-up fixpoint over every
   class, costs in a vector indexed by class id, iterated until no
@@ -49,8 +52,8 @@
                                  b (reduce (fn [b node]
                                              (let [c (node-cost g best cost-fn node)]
                                                (if (and c (or (nil? b)
-                                                              (< (:cost c) (:cost b))
-                                                              (and (= (:cost c) (:cost b))
+                                                              (neg? (compare (:cost c) (:cost b)))
+                                                              (and (zero? (compare (:cost c) (:cost b)))
                                                                    (neg? (term/compare-nodes node (:node b))))))
                                                  c
                                                  b)))

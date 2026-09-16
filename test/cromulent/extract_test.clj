@@ -31,6 +31,24 @@
     (is (contains? #{[:* :a 2] [:<< :a 1]} (:term (ex/extract g m))) "a tie under ast-size")
     (is (= {:cost 3 :term [:<< :a 1]} (ex/extract g m expensive-mul)))))
 
+(deftest vector-costs-compare-lexicographically
+  ;; [shifts size]: fewer shifts first, then the smaller term
+  (let [[g m] (eg/add (eg/egraph) [:* :a 2])
+        [g s] (eg/add g [:<< :a 1])
+        [g _] (eg/union g m s)
+        g (eg/rebuild g)
+        no-shift (fn [node child-costs]
+                   [(+ (if (and (term/compound? node) (= :<< (term/operator node))) 1 0)
+                       (reduce + 0 (map first child-costs)))
+                    (reduce + 1 (map second child-costs))])]
+    (is (= {:cost [0 3] :term [:* :a 2]} (ex/extract g m no-shift)))
+    (is (= {:cost [0 3] :term [:<< :a 1]}
+           (ex/extract g m (fn [node child-costs]
+                             [(+ (if (and (term/compound? node) (= :* (term/operator node))) 1 0)
+                                 (reduce + 0 (map first child-costs)))
+                              (reduce + 1 (map second child-costs))])))
+        "and the other way round")))
+
 (deftest cycles-are-harmless
   (let [[g x] (eg/add (eg/egraph) :x)
         [g x0] (eg/add g [:+ :x 0])

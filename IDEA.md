@@ -376,8 +376,10 @@ backoff releases a ban instead of stopping).
 (extract eg root cost-fn) -> {:cost c :term t}
 ```
 
-`cost-fn` is `(fn [e-node child-costs] number)`; the default is AST
-size. Bottom-up fixpoint over all classes, egg's Extractor, costs in a
+`cost-fn` is `(fn [e-node child-costs] cost)`; the default is AST
+size. A cost is any value `compare` orders: a number, or a vector for
+a lexicographic cost such as bendix's `no-D` (../bendix/IDEA.md
+section 6), and the extractor compares costs with `compare`. Bottom-up fixpoint over all classes, egg's Extractor, costs in a
 vector indexed by class id: iterate until no class's best cost
 changes; a node whose child has no cost yet is skipped, which is why
 cycles (`x = x + 0`) are harmless. Then rebuild the term top-down from each class's best node.
@@ -504,7 +506,9 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
   optional timeline, the `:check` dev-mode oracle, failures that name
   the rule (section 7).
 - `cromulent.extract` — `best-costs`, `extract`/`yoink`, `extractor`,
-  `ast-size`, deterministic ties (section 8).
+  `ast-size`, deterministic ties (section 8); costs ordered with
+  `compare`, so a vector is a lexicographic cost (2026-09-13, for
+  bendix's `no-D`).
 - `cromulent.check` — `violations` / `check!` over the invariants in
   section 3 (strict: after `rebuild`, memo keys, class nodes and parent
   keys are all canonical and parent ids are roots; the operator index

@@ -8,7 +8,9 @@
 (defn violations
   "Every broken invariant of g, as maps with a :type."
   [g]
-  (let [{:keys [next-id uf size memo classes by-op pending analysis-pending dirty? analyses]} g
+  (let [{:keys [next-id uf size classes by-op pending analysis-pending dirty? analyses ops op-names]} g
+        memo (vec (eg/memo-entries g))
+        memo-map (into {} memo)
         ids (range next-id)
         roots (filter #(eg/root? g %) ids)
         cls #(nth classes %)]
@@ -33,7 +35,7 @@
                     :when (not= node (eg/canonicalize g node))]
                 {:type :stale-class-node :id r :node node}))
         (into (for [r roots, node (:nodes (cls r))
-                    :let [id (get memo node)]
+                    :let [id (get memo-map node)]
                     :when (or (nil? id) (not= (eg/find g id) r))]
                 {:type :class-node-not-in-memo :id r :node node :memo-id id}))
         (into (for [r roots, [p pid] (:parents (cls r))
@@ -58,6 +60,9 @@
                                      roots)]
                 (when (not= expected by-op)
                   [{:type :by-op-index :expected expected :actual by-op}])))
+        (into (when-not (and (= (count ops) (count op-names))
+                             (every? (fn [[op i]] (= op (nth op-names i nil))) ops))
+                [{:type :operator-table :ops ops :op-names op-names}]))
         (into (when (or dirty? (seq pending) (seq analysis-pending))
                 [{:type :pending-not-empty :dirty? dirty? :pending pending :analysis-pending analysis-pending}]))
         ;; data is closed under joining what the nodes say

@@ -38,7 +38,13 @@
 (defn make
   "A compound node from an operator and a sequence of children."
   [op children]
-  (into [op] children))
+  (if (vector? children)
+    (case (count children)
+      0 [op]
+      1 [op (nth children 0)]
+      2 [op (nth children 0) (nth children 1)]
+      (into [op] children))
+    (into [op] children)))
 
 (defn- rank [x]
   (cond (number? x) 0 (keyword? x) 1 (symbol? x) 2 (string? x) 3 (vector? x) 4 :else 5))

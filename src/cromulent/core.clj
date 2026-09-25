@@ -12,7 +12,17 @@
     :next-id   next e-class id; ids are dense integers
     :uf        vector, id -> parent id (union-find; a root points to itself)
     :size      vector, root id -> class size, for union by size
-    :memo      canonical e-node -> class id (the hashcons)
+    :memo      the hashcons for compound nodes of arity two or less:
+               packed key -> class id, the key being
+               op-index·2^48 + a·2^24 + b for canonical children a and b
+               (an absent child is 2^24 − 1), a fixnum on both runtimes;
+               see `pack` and IDEA.md section 5
+    :memo-other
+               canonical e-node -> class id for leaves and for nodes of
+               arity three or more (a leaf number would collide with a
+               packed key)
+    :ops       operator -> index, interned on first add
+    :op-names  vector, index -> operator
     :classes   vector, root id -> class map, nil for non-roots
     :by-op     operator -> set of root ids whose class holds a node with
                that operator (the index e-matching starts from)
@@ -67,18 +77,25 @@
   throws rather than spin if an analysis breaks it."
   ([] (egraph {}))
   ([{:keys [analysis analyses]}]
-   {:next-id 0 :uf [] :size [] :memo {} :classes [] :by-op {}
+   {:next-id 0 :uf [] :size [] :memo {} :memo-other {} :ops {} :op-names []
+    :classes [] :by-op {}
     :pending [] :analysis-pending [] :dirty? false
     :analyses (vec (concat (when analysis [analysis]) analyses))
     :analysis-state {}}))
 
+(defn find-in
+  "The canonical (root) id of the class containing id, read from the
+  union-find vector uf itself. Hot loops fetch `(:uf eg)` once and call
+  this; `find` is the same over the e-graph."
+  [uf id]
+  (loop [i id]
+    (let [p (nth uf i)]
+      (if (= p i) i (recur p)))))
+
 (defn find
   "The canonical (root) id of the class containing id."
   [eg id]
-  (let [uf (:uf eg)]
-    (loop [i id]
-      (let [p (nth uf i)]
-        (if (= p i) i (recur p))))))
+  (find-in (:uf eg) id))
 
 (defn root?
   "Is id the canonical id of its class?"
@@ -86,9 +103,17 @@
   (= id (nth (:uf eg) id)))
 
 (defn canonicalize
-  "node with every child id replaced by its root."
+  "node with every child id replaced by its root. The very same node
+  when no child changes."
   [eg node]
-  (term/map-children #(find eg %) node))
+  (if (term/compound? node)
+    (let [uf (:uf eg), n (count node)]
+      (loop [i 1, node node]
+        (if (< i n)
+          (let [c (nth node i), r (find-in uf c)]
+            (recur (inc i) (if (= c r) node (assoc node i r))))
+          node)))
+    node))
 
 (defn eclass
   "The class map of the class containing id."
@@ -115,7 +140,77 @@
 (defn node-count
   "Number of distinct e-nodes. Exact after `rebuild`."
   [eg]
-  (count (:memo eg)))
+  (+ (count (:memo eg)) (count (:memo-other eg))))
+
+;; ---------------------------------------------------------------------------
+;; the hashcons
+;;
+;; A compound node of arity two or less is keyed by one fixnum, packed by
+;; multiplication and addition (shifts are slow on Jolt; IDEA.md section
+;; 5): the operator's index times 2^48, plus the first child times 2^24,
+;; plus the second child, an absent child written as 2^24 − 1. The sum
+;; stays under 2^60, Chez's fixnum range. Leaves and wider nodes are
+;; keyed by the node itself in :memo-other. Only a fresh node's lookup
+;; pays for its key; stored nodes stay tagged vectors everywhere else.
+
+(def ^:private op-scale 281474976710656)   ; 2^48
+(def ^:private id-scale 16777216)          ; 2^24
+(def ^:private absent 16777215)            ; 2^24 − 1
+(def ^:private max-id 16777214)            ; ids stay below the sentinel
+(def ^:private max-ops 4096)               ; 2^12 operators keep the key under 2^60
+
+(defn- packable? [node]
+  (and (term/compound? node) (<= (count node) 3)))
+
+(defn- pack
+  "The key of a canonical compound node of arity two or less."
+  [op-index node]
+  (let [n (count node)]
+    (+ (* op-index op-scale)
+       (* (if (> n 1) (nth node 1) absent) id-scale)
+       (if (> n 2) (nth node 2) absent))))
+
+(defn- unpack [op-names k]
+  (let [op (nth op-names (quot k op-scale))
+        a (rem (quot k id-scale) id-scale)
+        b (rem k id-scale)]
+    (cond (= a absent) [op]
+          (= b absent) [op a]
+          :else [op a b])))
+
+(defn- memo-get
+  "The class id stored for canonical node, or nil."
+  [eg node]
+  (if (packable? node)
+    (when-let [i (get (:ops eg) (term/operator node))]
+      (get (:memo eg) (pack i node)))
+    (get (:memo-other eg) node)))
+
+(defn- intern-op
+  "[eg' index] for operator op, assigning an index on first sight."
+  [eg op]
+  (if-let [i (get (:ops eg) op)]
+    [eg i]
+    (let [i (count (:op-names eg))]
+      (when (>= i max-ops)
+        (throw (ex-info "too many operators for packed hashcons keys" {:limit max-ops :operator op})))
+      [(-> eg (assoc-in [:ops op] i) (update :op-names conj op)) i])))
+
+(defn- memo-put
+  "eg with canonical node keyed to id."
+  [eg node id]
+  (if (packable? node)
+    (let [[eg i] (intern-op eg (term/operator node))]
+      (update eg :memo assoc (pack i node) id))
+    (update eg :memo-other assoc node id)))
+
+(defn memo-entries
+  "Every [canonical-node class-id] pair of the hashcons, packed keys
+  unpacked. For the checker and tests; not fast."
+  [eg]
+  (let [names (:op-names eg)]
+    (concat (map (fn [[k id]] [(unpack names k) id]) (:memo eg))
+            (seq (:memo-other eg)))))
 
 (declare union)
 
@@ -164,15 +259,17 @@
   its class instead of adding anything."
   [eg node]
   (let [node (canonicalize eg node)]
-    (if-let [id (get (:memo eg) node)]
+    (if-let [id (memo-get eg node)]
       [eg (find eg id)]
       (let [id (:next-id eg)
+            _ (when (> id max-id)
+                (throw (ex-info "too many e-classes for packed hashcons keys" {:limit max-id})))
             data (make-all eg node id)
             eg (-> eg
                    (assoc :next-id (inc id))
                    (update :uf conj id)
                    (update :size conj 1)
-                   (update :memo assoc node id)
+                   (memo-put node id)
                    (update :classes conj {:id id :nodes #{node} :parents {} :data data}))
             eg (if (term/compound? node)
                  (-> (reduce (fn [eg c] (update-in eg [:classes c :parents] assoc node id))
@@ -186,7 +283,7 @@
   "The canonical id of the class holding node (children are class
   ids), or nil when the e-graph has no such node. Adds nothing."
   [eg node]
-  (when-let [id (get (:memo eg) (canonicalize eg node))]
+  (when-let [id (memo-get eg (canonicalize eg node))]
     (find eg id)))
 
 (defn add
@@ -266,11 +363,11 @@
               eg (assoc eg :pending (pop pending))
               p' (canonicalize eg p)
               root (find eg pid)
-              other (get (:memo eg) p')
+              other (memo-get eg p')
               [eg root] (if (and (some? other) (not= (find eg other) root))
                           (union eg other root)
                           [eg root])]
-          (recur (update eg :memo assoc p' root)))))))
+          (recur (memo-put eg p' root)))))))
 
 (defn- recompute
   "Join what the class of c's canonical nodes now say into its data.
@@ -334,13 +431,13 @@
                             classes))
                         (:classes eg)
                         (range n))
-        memo (reduce (fn [memo i]
-                       (if-let [cls (nth classes i)]
-                         (reduce (fn [memo node] (assoc memo node i)) memo (:nodes cls))
-                         memo))
-                     {}
-                     (range n))]
-    (assoc eg :classes classes :memo memo)))
+        eg (assoc eg :classes classes :memo {} :memo-other {})]
+    (reduce (fn [eg i]
+              (if-let [cls (nth classes i)]
+                (reduce (fn [eg node] (memo-put eg node i)) eg (:nodes cls))
+                eg))
+            eg
+            (range n))))
 
 (defn rebuild
   "Restore congruence closure and every invariant after unions.

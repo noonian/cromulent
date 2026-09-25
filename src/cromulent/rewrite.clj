@@ -128,6 +128,15 @@
 
 (defn- now-ms [] (/ (double (System/nanoTime)) 1e6))
 
+(defn- compile-rule
+  "The rule with its pattern sides compiled once for the run; a
+  searcher or a computed right-hand side is left as it is. The caller's
+  rule map is not touched."
+  [r]
+  (cond-> r
+    (not (fn? (:lhs r))) (update :lhs pat/compile)
+    (and (some? (:rhs r)) (not (fn? (:rhs r)))) (update :rhs pat/compile)))
+
 (defn- search-rule
   "Every match of rule in g."
   [g {:keys [lhs]}]
@@ -199,6 +208,7 @@
              :as opts}]
    (let [rules (vec rules)
          _ (check-rules rules)
+         rules (mapv compile-rule rules)
          sched (resolve-scheduler scheduler opts)
          t0 (now-ms)
          g (eg/rebuild g)

@@ -132,4 +132,5 @@
   (row (chain 2000))
   (row (ac-sum 7))
   (row (ac-sum 8))
+  (row (ac-sum 10))
   (System/exit 0))

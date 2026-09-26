@@ -465,6 +465,247 @@ highest-leverage fixes for every program on it, and the design above
 stands after them: a packed key hashes one fixnum instead of three
 values and allocates nothing. Open question for the Captain.
 
+### Measured: the apply phase, second pass (2026-09-25)
+
+The row above left apply at 8.3 s of 11.9 on Jolt, with a candidate
+(a box instead of `[g id]` pairs, a node in one allocation) estimated
+at a tenth of it. Before building that, the phase was re-derived from
+measurement. Three instruments: the AC-10 run with the runner's own
+`:stats`; a copy of the runner's loop with a timer around every
+`instantiate` and every `union`; and per-match rows on the saturated
+AC-9 graph (18 669 nodes, 511 classes, 204 630 matches of the
+associativity pattern), best of five. The scripts were scratch; the
+numbers are the record.
+
+**Where apply goes.** AC-10, ten iterations, 3 336 820 matches, of
+which 136 376 merged two classes. A *hit* is an `instantiate` whose
+right-hand side already exists; a *miss* adds at least one node.
+Timer overhead (`System/nanoTime` is 117 ns on Jolt, 20 on the JVM)
+is subtracted.
+
+| | Jolt 0.8.12 | JVM (Clojure 1.12) |
+|---|---|---|
+| hits, 3 221 432 `instantiate` calls | about 4 750 ms | about 2 150 ms |
+| misses, 115 388 | 1 470 ms | 520 ms |
+| unions, 136 376 | 750 ms | 310 ms |
+| the runner's loop around them | about 1 600 ms | about 300 ms |
+| apply, uninstrumented | 8 555 ms | 3 279 ms |
+| per hit at saturation (iterations 9 and 10) | about 1 700 ns | about 700 ns |
+
+Iterations 8 to 10 hold 2.7 million of the matches and 5.3 s of
+Jolt's apply; iteration 10 exists only to observe that nothing
+changes. Unions move 1.07 nodes and 0.68 parents each on average
+(145 473 nodes and 93 174 parents over the run), so a union's cost is
+its constant, not its merging. There are twice as many misses as
+final nodes because a match found in the snapshot and re-applied in
+the working graph, after a union has moved one of its children, does
+not find its right-hand side under the new canonical form (the memo
+is re-keyed only at rebuild) and builds a duplicate, which rebuild
+merges away: the node count peaks at 59 456 in iteration 7 and ends
+at 57 012. egg's deferred rebuilding has the same property.
+
+**The hit path, per match on AC-9** (ns; the small pieces are net of
+the reduce and the three bindings reads they were measured with).
+
+| | Jolt | JVM |
+|---|---|---|
+| search as written: `ematch`, match maps built | 634–649 | 282–285 |
+| search, enumeration only: the callback counts | 316 | 142 |
+| apply as written: the runner's loop, `try`, destructuring | 1 648 | 626 |
+| `instantiate` (two `add-node` hits) | 1 420 | 571 |
+| one `add-node` hit, node prebuilt | 417 | 199 |
+| `canonicalize` of a prebuilt node | 123 | 63 |
+| one memo read, real packed key | 120 | 47 |
+| the same map, dense keys / random 60-bit keys | 115 / 128 | 47 / 44 |
+| `hash` of a fixnum, in situ | 55–80 | 8–9 |
+| three bindings reads, symbol keys | 60 | 49 |
+| five `find-in` | 232 | 113 |
+| five `[g id]` pairs | 115 | about 20 |
+| two nodes by `conj`, `conj`, `term/make` / as literals | 200 / 36 | 80 / under 10 |
+| `pat/compile` on a compiled pattern | 55 | 18 |
+| the `try` around each match | 53 | 0 |
+
+Three facts follow.
+
+1. **The packed key is not the cost.** Dense and random keys read at
+   the same speed. On Jolt the read is bounded by `hash` on a fixnum,
+   55 to 80 ns in situ (29 in the isolated row above), because Jolt
+   hashes fixnums with an exact port of Clojure's Murmur3 in Scheme
+   (`host/chez/hasheq.ss`, "JVM-compatible hash engine"): the values
+   must match the JVM's, so only its implementation could get
+   faster, not its shape. A design on Jolt reads the memo as few
+   times as a hit needs, twice for this right-hand side, and nothing
+   keyed by a hashed value beats it (the nested index, below).
+2. **Materializing matches is half of search** on both runtimes:
+   `bindings-of`, the match map and the transient `conj!` cost 320 ns
+   of 634 on Jolt and 140 of 285 on the JVM.
+3. **The hit path as built is not decision 5.** Per match it builds
+   two node vectors with `conj`, `conj` and `term/make` (100 ns each
+   on Jolt against 18 for a literal), canonicalizes each inside
+   `add-node` (a second `find` on ids the matcher just resolved),
+   packs, reads the memo, calls `find`, allocates five `[g id]`
+   pairs, re-checks that the pattern is compiled, reads four keyword
+   fields of the e-graph map per node, and destructures inside a
+   `try`. Decision 5 said the compiled `instantiate` would compute
+   keys from the registers and build no node unless new; what shipped
+   reads a bindings map, builds nodes and calls `add-node`. That is
+   why apply missed its projection and search met it.
+
+**Floors, measured as prototypes on AC-9**, per match, both phases:
+
+| | Jolt | JVM |
+|---|---|---|
+| as written: `ematch` then apply | 2 237–2 282 | 918–945 |
+| A: apply from the bindings map straight to packed keys, no node built; search unchanged | 634 + 638 = 1 272 | 282 + 309 = 591 |
+| A′: search writes the registers into a flat `long-array` (class root and one slot per variable per match); apply reads it and instantiates by packed lookups | 361 + 489 = 850 | 148 + 226 = 372 |
+| B: search and apply fused in the matcher's callback, no match representation at all | 779 | 295 |
+
+A′ is within a tenth of B on Jolt and keeps the two phases: the
+scheduler sees the count before anything is applied, guards and
+computed right-hand sides see the snapshot, `:stats` keep their
+meaning. B would run the enumeration twice under backoff. A′ is the
+decision.
+
+**The applied path**, per operation, the realistic case: a fresh
+node, then the union of its singleton class into the matched class.
+
+| | Jolt | JVM |
+|---|---|---|
+| `add-node` miss | 3 330 | 984 |
+| the union after it | 1 960 | 690 |
+| of the miss: `conj` on `:uf` / on `:size` | 265 / 266 | 100 / 82 |
+| `conj` of the class map on `:classes` | 391 | 166 |
+| memo `assoc`, packed key | 699 | 238 |
+| a parent `assoc` through `update-in [:classes c :parents]`, per child | 900 | 278 |
+| `:by-op` `conj` | 600–730 | 180–200 |
+| of the union: `assoc-in` on `:uf`, on `:classes` twice | 443, 483, 507 | 146, 122, 140 |
+| `:by-op` `disj` then `conj` | 1 114 | 194 |
+| `:pending` `conj`; one node merged into a 500-node set | 283; 288 | 59; 140 |
+
+Seven persistent writes per fresh node and five per union, 265 to
+1 100 ns each on Jolt: 2.2 s of the 12.2. The `conj!` row (55.6 ns)
+puts a transient scope over apply and rebuild at about half of that.
+Deferred, below.
+
+**Stale matches.** A match every node of which existed in the
+previous iteration's rebuilt graph, with the same canonical children
+and in the same class, was found and applied then; applying it again
+can only build a duplicate that rebuild merges (the trace above).
+Counted with lookups in the previous graph, which the runner has for
+free because the e-graph is a value:
+
+| iteration | matches | fresh |
+|---|---|---|
+| 7 | 450 435 | 398 129 |
+| 8 | 868 714 | 560 158 |
+| 9 | 931 610 | 166 412 |
+| 10 | 931 502 | 148 |
+| all ten | 3 336 820 | 1 272 302 |
+
+Saturating AC-6 to AC-9 with and without the filter gives identical
+node and class counts after every iteration and the same number of
+iterations, applying 46% of the matches. (A class-level test, any
+class whose node set changed, is also sound but keeps 78%: a few
+re-keyed parents mark a hub class as changed.) The argument: unions
+only grow classes, so what the earlier application put into the
+matched class is still there. Two conditions: the filter compares
+against the last iteration in which the rule was actually applied,
+since backoff drops matches; and it covers only pattern rules without
+a guard or a computed right-hand side, since analysis data can change
+under a stale match. In the cheap form, two lookups in the previous
+graph per match, it costs about what A′'s apply hit costs and buys
+nothing. The form that pays keeps an iteration stamp per node in the
+class's node map (`:nodes` as node → stamp, refreshed when a node is
+moved or re-keyed) and reads it in the matcher as it visits, skipping
+the callback. After A′ the hit path is about 1.6 s of 6 on Jolt and
+the filter removes 60% of it; seeding the search from fresh nodes
+through `:parents` (semi-naive; the relational matcher of section 6)
+removes the same fraction of search. Both second-order, both after A′.
+
+**Decisions (2026-09-25, second pass; built the same day).**
+
+1. **Flat match buffers in the runner (A′).** A compiled pattern rule
+   carries its plans and a stride, one plus its variable count. Its
+   search fills a `long-array` (grown by doubling, kept per rule
+   across iterations) with the class root and the registers of each
+   match; the count is the length over the stride and is what the
+   scheduler and `:stats` see. `ematch` keeps its public shape; the
+   runner does not call it for pattern rules. A guard or a computed
+   right-hand side receives a bindings map built from the buffer for
+   that match, so only rules that have one pay. Searcher rules are
+   unchanged.
+2. **Register-based `instantiate`.** The right-hand plan is walked
+   with the registers on the working graph: a variable is `find-in`
+   of its register; a compound node of arity two or less whose
+   operator is interned computes the packed key and reads `:memo`; a
+   hit yields `find-in` of the stored id; a miss, an unknown operator,
+   a leaf or a wider node builds the node and calls `add-node` as
+   today. `:uf` and `:memo` are read once per match (a union or a
+   miss changes them). No node vector, no `[g id]` pair, no
+   `canonicalize` and no `compile` check on the hit path; the working
+   graph is a loop variable. The public `instantiate` loads the
+   registers from its bindings map and runs the same walk: one
+   implementation.
+3. **Rules for hot code, added.** On the JVM an `aset` into a
+   `long-array` whose value the compiler cannot see as `long` is
+   reflective and costs about 3 µs (the flat search measured 2 989 ns
+   per match before a `long` cast, 148 after); cast first. Per-match
+   timing belongs in an instrumented copy of the runner, never in it.
+
+Projection from the AC-9 rows: Jolt search 2.5 → 1.2 s and hits
+4.75 → 1.6 s, misses, unions and rebuild unchanged, about 6.2 s from
+12.2; JVM about 2.7 s from 5.1. The search projection held last
+time; the apply one did not because decision 5 was not built as
+written. The prototype rows above are the code paths as they would
+ship, less the miss fallback and the scheduler plumbing.
+
+**Measured when built** (2026-09-25, the same day), AC-10, the
+runner's `:stats`:
+
+| phase | JVM before | JVM after | Jolt before | Jolt after |
+|---|---|---|---|---|
+| search | 1 134 ms | 551 ms | 2 516 ms | 1 361 ms |
+| apply | 3 279 ms | 2 337 ms | 8 555 ms | 4 498 ms |
+| rebuild | 684 ms | 711 ms | 1 152 ms | 1 152 ms |
+| total | 5 124 ms | 3 632 ms | 12 263 ms | 7 050 ms |
+
+Search met its projection on both runtimes. Apply did not quite: a
+hit at saturation (iteration 10) costs 720 ns on Jolt and 430 on the
+JVM against the prototypes' 489 and 226. The built functions on AC-9
+say where: `ematch-flat` 361 and 136 ns per match (the prototype 361
+and 148); `apply-flat` 707 and 385 (489 and 226). The difference is
+the plumbing the prototypes lacked: the instruction loop's `nth` and
+`case`, the `packed-key` call in place of inline arithmetic, a third
+keyword read (`:ops`) per match, and the register loads from the
+buffer with the cell that names a failing match (91 ns together on
+Jolt). About 200 ns per hit on both runtimes, 0.65 s of Jolt's 7.05;
+a closure-compiled program would recover part of it. The bench's
+ac-sum 10 row reads 7 060 ms on Jolt and 3 287 on the JVM, the JVM
+warm from the earlier fixtures. Suites unchanged and green on both
+runtimes, cromulent 49 tests and 172 assertions, bendix 70 and 366.
+Apply is still the largest phase on Jolt, about 2.25 s of hits,
+1.5 s of misses and 0.75 s of unions, so the applied path and then
+the stale filter stand as the next rows, in that order.
+
+**Rejected or deferred, each by a row above.**
+
+- **The box and the one-allocation node**, the earlier candidate:
+  115 ns of pairs and 164 ns of node building out of 1 648, 17% of
+  the hit path, measured. A′ removes both and the rest. Superseded.
+- **A nested memo index**, operator → first child → second child: the
+  innermost level hashes the second child, and the hash is the read's
+  cost (120 ns against 115 with dense keys); a scan or binary search
+  over up to 511 second children costs more than the hash. Rejected
+  by the `hash`, `nth` and `=` rows.
+- **The stale filter by previous-graph lookups**: the cost of the
+  thing it skips. **Per-node stamps and semi-naive search**: deferred,
+  second-order after A′, numbers above.
+- **A transient scope over apply and rebuild**: ceiling about 1 s of
+  12.2 on Jolt. Deferred until the applied path is the largest row.
+- **`union` updating `:by-op` per node of the smaller class** rather
+  than per operator: 1.07 nodes per union here; nothing to gain until
+  the AC experiments merge large classes.
+
 ### What persistence still buys, unchanged
 
 - **Timelines.** `(saturate eg rules {:timeline? true})` retains the
@@ -523,17 +764,30 @@ pattern is **compiled once** into a plan and matched by index loops:
   variable compares ids with `=`. Child ids are taken as they are
   when the graph is clean and passed through `find` otherwise
   (section 5, decision 3). Each match is delivered to a callback with
-  the registers; `ematch` copies them into the bindings map, and the
-  runner's pattern-to-pattern path hands them straight to the
-  compiled right-hand side.
-- `instantiate` walks the right-hand side's plan (the rule
-  constructor already checks that every right-hand variable is bound
-  on the left), reads each variable from the bindings map, builds
-  each compound node from its children's ids and hands it to
-  `add-node`, whose hit path packs the key and reads the map once.
+  the registers; `ematch` copies them into a bindings map per match,
+  and `ematch-flat` writes the class root and the registers into one
+  flat `long-array`, stride one plus the variable count, grown by
+  doubling and reused across a run, which is what the runner reads
+  for pattern rules (section 5, second pass).
+- The compiled form also holds a program for instantiation: a
+  post-order list of `[:leaf value dest]` and
+  `[:node op operand-registers dest]` over one register file,
+  variables first and temporaries after (`:program`, `:result`,
+  `:nregs`). `instantiate-registers` runs it: a node of arity two or
+  less is looked up by its packed key (`core/packed-key`), with
+  `:uf`, `:memo` and `:ops` read once per call and again after a
+  miss; a hit is `find-in` of the stored id; only a miss, a leaf, a
+  wider node or an unknown operator builds a node and calls
+  `add-node`. `instantiate` loads the registers from a bindings map
+  (the rule constructor already checks that every right-hand
+  variable is bound on the left) and runs the same program; the
+  runner loads them from the buffer. A right-hand side is compiled
+  with its left-hand side's `:vars` fixed, so both read the same
+  registers.
 - The runner compiles each rule's pattern sides once per `embiggen`
-  call, in its own copies of the rule maps; the caller's rules stay
-  plain data.
+  call, a right-hand pattern against its left-hand side's registers,
+  in its own copies of the rule maps; the caller's rules stay plain
+  data.
 
 Later, by benchmark: the relational e-matcher (Zhang et al. 2022).
 It would not change the API.
@@ -577,7 +831,12 @@ number of iterations; `:match-limit` 1000 and `:ban-length` 5 by
 default). A scheduler is a map `{:init :search :can-stop :report}`,
 so the AC experiments can bring their own. Backoff is not our answer
 to AC; it is the baseline the AC experiments (../design/ac-problem.md)
-are measured against.
+are measured against. A pattern rule's matches travel between the
+phases as a flat buffer, `{:buf long-array :n count}`, never as maps;
+a searcher's are a vector of maps; `match-count` counts either, and
+`[]` from a scheduler means none. A guard or a computed right-hand
+side is handed a bindings map built from the buffer for its match,
+so only rules that have one pay for maps.
 
 `:lhs` may be a *searcher* `(fn [eg] [{:class id :bindings {...}}])`
 in place of a pattern, egg's `Searcher` as a function; a pattern is
@@ -781,20 +1040,23 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
 
   | fixture | n | JVM | Jolt 0.8.12 |
   |---|---|---|---|
-  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 211 ms | 336 ms |
-  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 25 ms | 20 ms |
-  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 14 ms | 14 ms |
-  | union + rebuild (random unions on the above) | 2 000 | 112 ms | 138 ms |
-  | extract, cost table for every class of the above | 35 967 | 50 ms | 84 ms |
-  | embiggen, egg README rules on the above, 2 iterations (→ 45 282 nodes, 22 871 classes) | 2 | 747 ms | 1 380 ms |
-  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 9 ms | 20 ms |
-  | ac-sum, saturate a 7-atom sum under comm + assoc (127 classes, 1 939 nodes, 8 iterations) | 7 | 64 ms | 137 ms |
-  | ac-sum, the same with 8 atoms (255 classes, 6 058 nodes, 9 iterations) | 8 | 246 ms | 623 ms |
-  | ac-sum, 10 atoms (1 023 classes, 57 012 nodes, 10 iterations): the yardstick of section 5 | 10 | 5 047 ms | 11 745 ms |
+  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 219 ms | 341 ms |
+  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 26 ms | 21 ms |
+  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 14 ms | 15 ms |
+  | union + rebuild (random unions on the above) | 2 000 | 110 ms | 140 ms |
+  | extract, cost table for every class of the above | 35 967 | 53 ms | 81 ms |
+  | embiggen, egg README rules on the above, 2 iterations (→ 45 282 nodes, 22 871 classes) | 2 | 802 ms | 1 315 ms |
+  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 10 ms | 20 ms |
+  | ac-sum, saturate a 7-atom sum under comm + assoc (127 classes, 1 939 nodes, 8 iterations) | 7 | 52 ms | 100 ms |
+  | ac-sum, the same with 8 atoms (255 classes, 6 058 nodes, 9 iterations) | 8 | 175 ms | 418 ms |
+  | ac-sum, 10 atoms (1 023 classes, 57 012 nodes, 10 iterations): the yardstick of section 5 | 10 | 3 287 ms | 7 060 ms |
 
-  Measured 2026-09-25 after compiled patterns and packed hashcons
-  keys landed (before them, on the same machine: ematch 57 and 68 ms,
-  ac-sum 8 361 and 1 717 ms, ac-sum 10 7 511 and 21 090 ms). The
+  Measured 2026-09-25 after the second pass (flat match buffers and
+  the register program, section 5) landed. After the first pass
+  alone, compiled patterns and packed keys: egg rules 747 and
+  1 380 ms, ac-sum 7 64 and 137, ac-sum 8 246 and 623, ac-sum 10
+  5 047 and 11 745; before both, on the same machine: ematch 57 and
+  68 ms, ac-sum 8 361 and 1 717 ms, ac-sum 10 7 511 and 21 090 ms. The
   ac-sum rows are experiment 1 of ../design/ac-problem.md, the
   baseline. The embiggen row is where the class-level worklist was
   caught (section 4); the ac-sum 10 row is where the fresh-key
@@ -816,6 +1078,20 @@ once per run; `cromulent.term/make` builds small nodes without
 `into`; the checker verifies the operator table and reads the
 hashcons through `memo-entries`. The bench gained the ac-sum 10 row.
 bendix's bench rows are unchanged or faster on both runtimes.
+
+Flat match buffers and the register program (2026-09-25, section 5
+second pass and section 6, green on both runtimes, the suites
+unchanged at 49/172 and 70/366): `cromulent.pattern/compile` takes
+fixed variables and emits an instantiation program; `ematch-flat`
+writes matches as class root and registers into a reusable
+`long-array`; `instantiate-registers` runs the program with
+packed-key lookups and `add-node` only on a miss, and `instantiate`
+is a wrapper over it; `cromulent.core/packed-key`;
+`cromulent.rewrite` compiles a right-hand pattern against its
+left-hand side's registers, keeps one buffer per pattern rule per
+run, applies flat matches without allocating on a hit, and counts
+matches with `match-count`. AC-10: Jolt 12.3 → 7.1 s, JVM 5.1 →
+3.6 s.
 
 Not yet: explanations, relational e-matching; the AC experiments
 beyond 1–3 live in bendix. CI workflow is written but the repository has no

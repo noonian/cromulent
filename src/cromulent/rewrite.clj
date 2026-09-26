@@ -75,6 +75,15 @@
 ;;  :search   (fn [state iter rule search-thunk] [state' matches])
 ;;  :can-stop (fn [state iter] [state' bool])
 ;;  :report   (fn [state iter] map)}          ; optional; merged into the iteration's stats
+;;
+;; matches is whatever the thunk returned (a vector of match maps for a
+;; searcher, a flat buffer for a pattern rule; `match-count` counts
+;; either), or [] to apply none.
+
+(defn match-count
+  "How many matches a search returned."
+  [ms]
+  (if (map? ms) (:n ms) (count ms)))
 
 (def simple-scheduler
   "Every match of every rule, every iteration."
@@ -98,7 +107,7 @@
                (if (< iter banned-until)
                  [state []]
                  (let [ms (search)]
-                   (if (> (count ms) (bit-shift-left match-limit times-banned))
+                   (if (> (match-count ms) (bit-shift-left match-limit times-banned))
                      [(assoc state name {:banned-until (+ iter (bit-shift-left ban-length times-banned))
                                          :times-banned (inc times-banned)})
                       []]
@@ -129,27 +138,40 @@
 (defn- now-ms [] (/ (double (System/nanoTime)) 1e6))
 
 (defn- compile-rule
-  "The rule with its pattern sides compiled once for the run; a
-  searcher or a computed right-hand side is left as it is. The caller's
-  rule map is not touched."
+  "The rule with its pattern sides compiled once for the run: the
+  left-hand side on its own and a right-hand pattern against its
+  registers, so one match's registers serve both. A searcher or a
+  computed right-hand side is left as it is. The caller's rule map is
+  not touched."
   [r]
-  (cond-> r
-    (not (fn? (:lhs r))) (update :lhs pat/compile)
-    (and (some? (:rhs r)) (not (fn? (:rhs r)))) (update :rhs pat/compile)))
+  (let [lhs (:lhs r), rhs (:rhs r)
+        lhs' (if (fn? lhs) lhs (pat/compile lhs))
+        rhs' (cond
+               (or (nil? rhs) (fn? rhs)) rhs
+               (fn? lhs) (pat/compile rhs)
+               :else (pat/compile rhs (:vars lhs')))]
+    (assoc r :lhs lhs' :rhs rhs')))
 
 (defn- search-rule
-  "Every match of rule in g."
-  [g {:keys [lhs]}]
-  (if (fn? lhs) (lhs g) (pat/ematch g lhs)))
+  "Every match of rule in g: a searcher's vector of match maps, or for
+  a pattern {:buf long-array :n count}, the matches flat in the buffer
+  that cell holds (cromulent.pattern/ematch-flat), which grows in
+  place across the run."
+  [g {:keys [lhs]} cell]
+  (if (fn? lhs)
+    (lhs g)
+    (let [[buf n] (pat/ematch-flat g lhs @cell)]
+      (reset! cell buf)
+      {:buf buf :n n})))
 
 (defn- apply-rule
-  "Apply every match of rule to g. snapshot is the e-graph the matches
-  were found in, which is what the guard and a computed rhs see.
-  Returns [g' n-applied], counting only matches whose union merged two
-  classes. A match carrying :rhs supplies its own right-hand side. An
-  exception raised while applying (an analysis refusing a
-  merge, say) is rethrown with the rule's name and the match in its
-  data."
+  "Apply every match map of rule to g. snapshot is the e-graph the
+  matches were found in, which is what the guard and a computed rhs
+  see. Returns [g' n-applied], counting only matches whose union
+  merged two classes. A match carrying :rhs supplies its own
+  right-hand side. An exception raised while applying (an analysis
+  refusing a merge, say) is rethrown with the rule's name and the
+  match in its data."
   [snapshot g rule matches]
   (let [{:keys [rhs], guard :when} rule]
     (reduce (fn [[g n] {:keys [class bindings] :as m}]
@@ -172,6 +194,67 @@
                                   e)))))
             [g 0]
             matches)))
+
+(defn- bindings-at
+  "The bindings map of the match at base in buf."
+  [vars ^longs buf base]
+  (let [k (count vars)]
+    (loop [i 0, m {}]
+      (if (< i k)
+        (recur (inc i) (assoc m (nth vars i) (aget buf (+ base 1 i))))
+        m))))
+
+(defn- apply-flat
+  "Apply the n matches of a pattern rule that lie flat in buf, as
+  `apply-rule` does for match maps: the registers go straight to the
+  compiled right-hand side and nothing is allocated on a hit; a guard
+  or a computed right-hand side is handed a bindings map for its
+  match. Returns [g' n-applied]; an exception is rethrown with the
+  rule's name and the match."
+  [snapshot g rule ^longs buf n]
+  (let [{:keys [lhs rhs], guard :when} rule
+        vars (:vars lhs), k (count vars), stride (inc k)
+        direct? (and (some? rhs) (not (fn? rhs)))
+        regs (if direct? (long-array (:nregs rhs) -1) (long-array 0))
+        result (if direct? (:result rhs) 0)
+        cur (long-array 1 0)]
+    (try
+      (loop [m 0, base 0, g g, applied 0]
+        (if (< m n)
+          (let [x (aget buf base)]
+            (aset cur 0 base)
+            (cond
+              (and guard (not (guard snapshot (bindings-at vars buf base))))
+              (recur (inc m) (+ base stride) g applied)
+
+              direct?
+              (do (loop [i 0]
+                    (when (< i k)
+                      (aset regs i (aget buf (+ base 1 i)))
+                      (recur (inc i))))
+                  (let [g (pat/instantiate-registers g rhs regs)
+                        id (aget regs result)
+                        uf (:uf g)]
+                    (if (= (eg/find-in uf id) (eg/find-in uf x))
+                      (recur (inc m) (+ base stride) g applied)
+                      (recur (inc m) (+ base stride) (first (eg/union g id x)) (inc applied)))))
+
+              :else
+              (let [bindings (bindings-at vars buf base)
+                    p (when rhs (rhs snapshot bindings))]
+                (if (nil? p)
+                  (recur (inc m) (+ base stride) g applied)
+                  (let [[g id] (pat/instantiate g p bindings)]
+                    (if (= (eg/find g id) (eg/find g x))
+                      (recur (inc m) (+ base stride) g applied)
+                      (recur (inc m) (+ base stride) (first (eg/union g id x)) (inc applied))))))))
+          [g applied]))
+      (catch Exception e
+        (let [base (aget cur 0)]
+          (throw (ex-info (str "rule " (:name rule) " failed: " (ex-message e))
+                          (assoc (or (ex-data e) {}) :rule (:name rule)
+                                 :match {:class (aget buf base) :bindings (bindings-at vars buf base)})
+                          e)))))))
 
 (defn- check-rules [rules]
   (let [names (map :name rules)]
@@ -209,6 +292,7 @@
    (let [rules (vec rules)
          _ (check-rules rules)
          rules (mapv compile-rule rules)
+         cells (mapv (fn [r] (when-not (fn? (:lhs r)) (atom (long-array 1024)))) rules)
          sched (resolve-scheduler scheduler opts)
          t0 (now-ms)
          g (eg/rebuild g)
@@ -223,15 +307,17 @@
            (> (- (now-ms) t0) time-limit-ms) (result g stats timeline :time-limit)
            :else
            (let [t-search (now-ms)
-                 [state found] (reduce (fn [[state found] rule]
+                 [state found] (reduce (fn [[state found] [rule cell]]
                                          (let [[state ms] ((:search sched) state iter rule
-                                                           #(search-rule g rule))]
+                                                           #(search-rule g rule cell))]
                                            [state (conj found ms)]))
                                        [state []]
-                                       rules)
+                                       (map vector rules cells))
                  t-apply (now-ms)
                  [g' applied] (reduce (fn [[g' applied] [rule ms]]
-                                        (let [[g' n] (apply-rule g g' rule ms)
+                                        (let [[g' n] (if (map? ms)
+                                                       (apply-flat g g' rule (:buf ms) (:n ms))
+                                                       (apply-rule g g' rule ms))
                                               g' (if (and check (pos? n))
                                                    (let [g' (eg/rebuild g')]
                                                      (when-let [problem (check g')]
@@ -247,7 +333,7 @@
                  t-end (now-ms)
                  nodes (eg/node-count g')
                  stat (merge {:iter iter :nodes nodes :classes (eg/class-count g')
-                              :matches (zipmap (map :name rules) (map count found))
+                              :matches (zipmap (map :name rules) (map match-count found))
                               :applied applied
                               :search-ms (- t-apply t-search)
                               :apply-ms (- t-rebuild t-apply)

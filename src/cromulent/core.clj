@@ -178,6 +178,17 @@
           (= b absent) [op a]
           :else [op a b])))
 
+(defn packed-key
+  "The hashcons key of the canonical node [op a b], a and b class ids
+  with b, or both, nil for arity one or zero; nil when op has no index
+  yet, in which case the node is new. ops is (:ops eg), read once by a
+  caller looking many nodes up; the lookup is (get (:memo eg) key)."
+  [ops op a b]
+  (when-let [i (get ops op)]
+    (+ (* i op-scale)
+       (* (if (nil? a) absent a) id-scale)
+       (if (nil? b) absent b))))
+
 (defn- memo-get
   "The class id stored for canonical node, or nil."
   [eg node]

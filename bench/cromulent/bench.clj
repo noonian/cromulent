@@ -8,9 +8,8 @@
   (:require [cromulent.core :as eg]
             [cromulent.extract :as ex]
             [cromulent.pattern :as pat]
+            [cromulent.platform :as platform]
             [cromulent.rewrite :as rw]))
-
-(defn- now-ms [] (/ (double (System/nanoTime)) 1e6))
 
 (defn- lcg
   "A deterministic stream: (lcg seed) returns a fn of no args yielding
@@ -34,7 +33,7 @@
       (into [op] (repeatedly arity #(rand-term next! (dec depth)))))))
 
 (defn- timed [f]
-  (let [t0 (now-ms), r (f), t1 (now-ms)]
+  (let [t0 (platform/now-ms), r (f), t1 (platform/now-ms)]
     [(- t1 t0) r]))
 
 (defn add-terms

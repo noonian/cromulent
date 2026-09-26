@@ -4,11 +4,13 @@
             [cromulent.core-test]
             [cromulent.pattern-test]
             [cromulent.rewrite-test]
-            [cromulent.extract-test]))
+            [cromulent.extract-test]
+            [cromulent.smoke-test]))
 
 (defn -main [& _]
   (let [{:keys [fail error]} (t/run-tests 'cromulent.core-test
                                           'cromulent.pattern-test
                                           'cromulent.rewrite-test
-                                          'cromulent.extract-test)]
+                                          'cromulent.extract-test
+                                          'cromulent.smoke-test)]
     (System/exit (if (pos? (+ fail error)) 1 0))))

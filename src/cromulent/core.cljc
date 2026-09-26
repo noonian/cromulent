@@ -14,9 +14,10 @@
     :size      vector, root id -> class size, for union by size
     :memo      the hashcons for compound nodes of arity two or less:
                packed key -> class id, the key being
-               op-index·2^48 + a·2^24 + b for canonical children a and b
-               (an absent child is 2^24 − 1), a fixnum on both runtimes;
-               see `pack` and IDEA.md section 5
+               op-index·2^42 + a·2^21 + b for canonical children a and b
+               (an absent child is 2^21 − 1), under 2^53: a fixnum on the
+               JVM and on Chez, and exact in a JavaScript double; see
+               `pack` and IDEA.md section 5
     :memo-other
                canonical e-node -> class id for leaves and for nodes of
                arity three or more (a leaf number would collide with a
@@ -147,17 +148,19 @@
 ;;
 ;; A compound node of arity two or less is keyed by one fixnum, packed by
 ;; multiplication and addition (shifts are slow on Jolt; IDEA.md section
-;; 5): the operator's index times 2^48, plus the first child times 2^24,
-;; plus the second child, an absent child written as 2^24 − 1. The sum
-;; stays under 2^60, Chez's fixnum range. Leaves and wider nodes are
-;; keyed by the node itself in :memo-other. Only a fresh node's lookup
-;; pays for its key; stored nodes stay tagged vectors everywhere else.
+;; 5): the operator's index times 2^42, plus the first child times 2^21,
+;; plus the second child, an absent child written as 2^21 − 1. The sum
+;; stays under 2^53: a fixnum on Chez and the JVM, and exact in a
+;; JavaScript double, so the same layout serves all three runtimes; the
+;; largest key is 2^53 − 1 exactly. Leaves and wider nodes are keyed by
+;; the node itself in :memo-other. Only a fresh node's lookup pays for
+;; its key; stored nodes stay tagged vectors everywhere else.
 
-(def ^:private op-scale 281474976710656)   ; 2^48
-(def ^:private id-scale 16777216)          ; 2^24
-(def ^:private absent 16777215)            ; 2^24 − 1
-(def ^:private max-id 16777214)            ; ids stay below the sentinel
-(def ^:private max-ops 4096)               ; 2^12 operators keep the key under 2^60
+(def ^:private op-scale 4398046511104)     ; 2^42
+(def ^:private id-scale 2097152)           ; 2^21
+(def ^:private absent 2097151)             ; 2^21 − 1
+(def ^:private max-id 2097150)             ; ids stay below the sentinel
+(def ^:private max-ops 2048)               ; 2^11 operators keep the key under 2^53
 
 (defn- packable? [node]
   (and (term/compound? node) (<= (count node) 3)))

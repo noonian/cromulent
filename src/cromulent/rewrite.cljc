@@ -41,7 +41,8 @@
   happens. A scheduler is a map of three functions, so the AC
   experiments can supply their own."
   (:require [cromulent.core :as eg]
-            [cromulent.pattern :as pat]))
+            [cromulent.pattern :as pat]
+            [cromulent.platform :as platform]))
 
 ;; ---------------------------------------------------------------------------
 ;; rules
@@ -85,6 +86,14 @@
   [ms]
   (if (map? ms) (:n ms) (count ms)))
 
+(defn- times-pow2
+  "x·2^n by doubling: a shift is 32-bit in JavaScript and slow on
+  Jolt (IDEA.md section 5). n is how many times a rule has been
+  banned, so it stays small."
+  [x n]
+  (loop [x x, n n]
+    (if (pos? n) (recur (* 2 x) (dec n)) x)))
+
 (def simple-scheduler
   "Every match of every rule, every iteration."
   {:init (fn [_ _] nil)
@@ -107,8 +116,8 @@
                (if (< iter banned-until)
                  [state []]
                  (let [ms (search)]
-                   (if (> (match-count ms) (bit-shift-left match-limit times-banned))
-                     [(assoc state name {:banned-until (+ iter (bit-shift-left ban-length times-banned))
+                   (if (> (match-count ms) (times-pow2 match-limit times-banned))
+                     [(assoc state name {:banned-until (+ iter (times-pow2 ban-length times-banned))
                                          :times-banned (inc times-banned)})
                       []]
                      [state ms])))))
@@ -134,8 +143,6 @@
 
 ;; ---------------------------------------------------------------------------
 ;; the runner
-
-(defn- now-ms [] (/ (double (System/nanoTime)) 1e6))
 
 (defn- compile-rule
   "The rule with its pattern sides compiled once for the run: the
@@ -188,7 +195,7 @@
                         (if (= (eg/find g id) (eg/find g class))
                           [g n]
                           [(first (eg/union g id class)) (inc n)])))))
-                (catch Exception e
+                (catch #?(:clj Exception :default :default) e
                   (throw (ex-info (str "rule " (:name rule) " failed: " (ex-message e))
                                   (assoc (or (ex-data e) {}) :rule (:name rule) :match m)
                                   e)))))
@@ -249,7 +256,7 @@
                       (recur (inc m) (+ base stride) g applied)
                       (recur (inc m) (+ base stride) (first (eg/union g id x)) (inc applied))))))))
           [g applied]))
-      (catch Exception e
+      (catch #?(:clj Exception :default :default) e
         (let [base (aget cur 0)]
           (throw (ex-info (str "rule " (:name rule) " failed: " (ex-message e))
                           (assoc (or (ex-data e) {}) :rule (:name rule)
@@ -294,26 +301,26 @@
          rules (mapv compile-rule rules)
          cells (mapv (fn [r] (when-not (fn? (:lhs r)) (atom (long-array 1024)))) rules)
          sched (resolve-scheduler scheduler opts)
-         t0 (now-ms)
+         t0 (platform/now-ms)
          g (eg/rebuild g)
          result (fn [g stats timeline reason]
                   (cond-> {:egraph g :iterations (count stats) :stop-reason reason
-                           :stats stats :ms (- (now-ms) t0)}
+                           :stats stats :ms (- (platform/now-ms) t0)}
                     timeline? (assoc :timeline timeline)))]
      (loop [g g, state ((:init sched) rules opts), stats [], timeline [g]]
        (let [iter (inc (count stats))]
          (cond
            (> iter iter-limit) (result g stats timeline :iter-limit)
-           (> (- (now-ms) t0) time-limit-ms) (result g stats timeline :time-limit)
+           (> (- (platform/now-ms) t0) time-limit-ms) (result g stats timeline :time-limit)
            :else
-           (let [t-search (now-ms)
+           (let [t-search (platform/now-ms)
                  [state found] (reduce (fn [[state found] [rule cell]]
                                          (let [[state ms] ((:search sched) state iter rule
                                                            #(search-rule g rule cell))]
                                            [state (conj found ms)]))
                                        [state []]
                                        (map vector rules cells))
-                 t-apply (now-ms)
+                 t-apply (platform/now-ms)
                  [g' applied] (reduce (fn [[g' applied] [rule ms]]
                                         (let [[g' n] (if (map? ms)
                                                        (apply-flat g g' rule (:buf ms) (:n ms))
@@ -328,9 +335,9 @@
                                           [g' (assoc applied (:name rule) n)]))
                                       [g {}]
                                       (map vector rules found))
-                 t-rebuild (now-ms)
+                 t-rebuild (platform/now-ms)
                  g' (eg/rebuild g')
-                 t-end (now-ms)
+                 t-end (platform/now-ms)
                  nodes (eg/node-count g')
                  stat (merge {:iter iter :nodes nodes :classes (eg/class-count g')
                               :matches (zipmap (map :name rules) (map match-count found))

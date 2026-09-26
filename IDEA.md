@@ -34,12 +34,13 @@ is `embiggen`; extraction, which pulls the best term out, may be
   `bench/` row on both runtimes points, and nowhere else.
 - The user-facing term shape (tagged vectors) and the internal e-node
   representation are separate decisions. Convert at the boundary.
-- One source for Jolt and the JVM; no runtime-specific fast paths
-  unless a benchmark on both justifies the split.
+- One source for Jolt, the JVM and ClojureScript; no runtime-specific
+  fast paths unless a benchmark on both primary runtimes justifies the
+  split.
 
 ## 1. Portability constraints and what the runtime offers
 
-Both runtimes, one source. Verified on Jolt v0.8.7, 2026-09-13:
+Both primary runtimes, one source. Verified on Jolt v0.8.7, 2026-09-13:
 
 - Available on both: maps, vectors, sets, sorted collections, records,
   protocols, multimethods; **transients** (`transient`, `assoc!`,
@@ -52,6 +53,20 @@ Both runtimes, one source. Verified on Jolt v0.8.7, 2026-09-13:
 - `hash` values differ across runtimes; nothing may persist or compare
   hashes across processes. Structural equality is what we rely on.
 - `(= 1 1.0)` is false on both; the CAS uses exact numbers only.
+
+The third runtime, ClojureScript (2026-09-25, for orrery): the source
+is `.cljc` and compiles unchanged under shadow-cljs. `long-array`,
+`aset`, `aget` and `long` exist in ClojureScript core (a JS array; the
+`^longs` hints are ignored). What differs: a number is exact only to
+2^53, so the packed key was narrowed (section 5, decision 2); a shift
+is 32-bit, so backoff doubles by multiplication; there is no
+exception class, so the runner's two `catch` clauses are
+`#?(:clj Exception :default :default)`; and the clock is
+`cromulent.platform/now-ms`, the one file with reader conditionals,
+as `catalytic.defaults` is for catalytic-buffer. Hash iteration order
+differs there too, so root ids and tied extractions are stable per
+runtime only (section 8). No ratio or bignum exists; that is bendix's
+problem, not this library's.
 
 Measured costs, one million operations, arm64 macOS:
 
@@ -328,9 +343,10 @@ a fresh vector key costs it too.
 Rules for hot code in this codebase, both runtimes, each a row above:
 `nth` and never `get` on a vector; index loops and never `first` and
 `rest`; `reduce`, or `loop` with `conj!`, and never `into` with a
-transducer, per element; multiply and never shift, to pack; `=` and
-never `==` on ids; never build and hash a fresh vector in a hot path;
-resolve a pattern's symbols once and never per visit.
+transducer, per element; multiply and never shift, to pack (and a
+shift is 32-bit in JavaScript); `=` and never `==` on ids; never
+build and hash a fresh vector in a hot path; resolve a pattern's
+symbols once and never per visit.
 
 ### Decisions (2026-09-25; built the same day)
 
@@ -342,14 +358,26 @@ resolve a pattern's symbols once and never per visit.
    against 148.9 as written on the JVM, and in 121.6 against 508.7 on
    Jolt: 4.1× and 4.2×.
 2. **Packed hashcons keys.** The memo is keyed by a fixnum for a
-   compound node of arity two or less: `op·2^48 + a·2^24 + b`, by
+   compound node of arity two or less: `op·2^42 + a·2^21 + b`, by
    multiplication and addition, since shifts cost 16 to 35 ns on
-   Jolt; an absent child is written as 2^24 − 1; the sum stays under
-   2^60 and so is a fixnum on Chez. Operators are interned per e-graph
-   in `:ops` (operator to index) and `:op-names` (index to operator),
-   assigned on first `add-node`; ids are bounded at 2^24 − 2 and
-   operators at 2^12, far past any limit in use, and either overflow
-   throws. Leaves and nodes of arity three or more keep the node
+   Jolt; an absent child is written as 2^21 − 1; the sum stays under
+   2^53, a fixnum on Chez, a long on the JVM and exact in a JavaScript
+   double, so one layout serves all three runtimes (narrowed from
+   2^48/2^24 on 2026-09-25 for the ClojureScript port; the old layout
+   collided silently in a double from the 33rd operator). Operators
+   are interned per e-graph in `:ops` (operator to index) and
+   `:op-names` (index to operator), assigned on first `add-node`; ids
+   are bounded at 2^21 − 2 (2 097 150; the AC-10 run allocates about
+   sixty thousand, AC-13 would be the first to overflow) and
+   operators at 2^11 (2 048; bendix uses about fifteen), and either
+   overflow throws. **Measured, the key layout** (2026-09-25, three
+   runs each, medians; the change is two multiplication constants):
+   JVM ac-sum 10 3 374 → 3 352 ms, ac-sum 8 179 → 178, egg rules
+   851 → 815, add-terms 224 → 224, union+rebuild 113 → 109; Jolt
+   ac-sum 10 7 212 → 7 068, ac-sum 8 420 → 417, egg rules 1 331 →
+   1 314, add-terms 344 → 339, union+rebuild 152 → 139. Every row
+   within noise or faster on both, so there is one layout and no
+   per-platform constant. Leaves and nodes of arity three or more keep the node
    itself as the key, in a second map `:memo-other`, because a leaf
    number would collide with a packed key; `node-count` sums the two.
    E-nodes stay tagged vectors everywhere else, in `:nodes`,
@@ -877,7 +905,14 @@ cycles (`x = x + 0`) are harmless. Then rebuild the term top-down from each clas
 table across many extractions; `yoink` is `extract`'s alias. Ties
 between equal-cost nodes go to the smaller node under
 `cromulent.term/compare-nodes`, a total order that is the same on
-both runtimes, so extraction is a function of the e-graph value. The cost
+every runtime, so extraction is a function of the e-graph value. It
+is not, however, the same across runtimes when costs tie: the order
+compares child *ids*, and which id survives a union depends on the
+order matches are applied, which follows hash iteration order
+(reductions over `:by-op` sets and `:parents` maps) and differs per
+runtime. Costs, counts and per-rule totals agree everywhere; a
+term is runtime-stable when its minimum is unique. An id-free
+tie-break (comparing the built terms) is a later, benchmarked change. The cost
 function must be monotone (a node costs strictly more than any child)
 or a cyclic node can be chosen. bendix supplies cost functions that
 encode taste (../bendix/IDEA.md); the core guarantees the minimum.
@@ -944,6 +979,11 @@ Constant folding is the degenerate case.
 - Acceptance examples from the egg README.
 - Both runtimes in CI from day one; benchmarks in `bench/` from the
   first milestone.
+- **The third runtime**: `cromulent.smoke` (`test/`, `.cljc`) is a
+  vector of runtime-stable facts about fixed runs, plain data;
+  `cromulent.smoke-test` asserts it on the JVM and Jolt, and orrery's
+  node build (`npm run smoke` in ../orrery) prints the same rows on
+  ClojureScript. Never ids, never a tied term.
 
 ## 11. Later
 
@@ -964,6 +1004,20 @@ Constant folding is the degenerate case.
   checker in hand.
 - Records vs maps on Jolt: measured 2026-09-25, maps (section 5,
   "Answered on the way").
+- One key layout or two, for ClojureScript: measured 2026-09-25, one
+  (section 5, decision 2).
+- **Retiring the packed key** (the Captain's question, 2026-09-25):
+  keying the memo by the canonical node itself would remove `:ops`,
+  `:op-names`, `:memo-other` and the two limits. The second pass
+  found "the packed key is not the cost" about its shape; what it
+  buys is the fresh-vector hash on every right-hand-side lookup: a
+  memo read with a vector key built fresh is 423 ns on Jolt and 108
+  on the JVM against 199 and 74 packed on the spot (section 5, the
+  first table), and `instantiate-registers` reads the memo from the
+  registers without building a node at all. Over the roughly six
+  million lookups of AC-10 that is on the order of a second on Jolt
+  and a few hundred milliseconds on the JVM. A bench row's decision,
+  when simplicity is wanted more than that.
 
 ## Status
 
@@ -1093,6 +1147,19 @@ run, applies flat matches without allocating on a hit, and counts
 matches with `match-count`. AC-10: Jolt 12.3 → 7.1 s, JVM 5.1 →
 3.6 s.
 
-Not yet: explanations, relational e-matching; the AC experiments
-beyond 1–3 live in bendix. CI workflow is written but the repository has no
-remote.
+Portable to ClojureScript (2026-09-25, for ../orrery; sections 1, 5
+decision 2, 8, 10; green on both primary runtimes, 51 tests and 204
+assertions, bendix unchanged at 70/366): the six source namespaces
+renamed `.clj` → `.cljc` with no change but the port's four edits;
+the packed key narrowed to `op·2^42 + a·2^21 + b` with the bench
+medians unchanged; `cromulent.platform` (the clock) as the one
+conditional file; backoff doubling by `times-pow2`; the two `catch`
+clauses conditional; `cromulent.smoke`, 28 runtime-stable facts,
+asserted by the suite here and by orrery's node build (all 28 pass,
+54 ms, zero compiler warnings on the engine). The tests and the bench
+stay `.clj`.
+
+Not yet: explanations, relational e-matching; the runner as
+start/step/finish so that a stepped run equals one run under backoff
+(orrery's lesson 5 asks for it); the AC experiments beyond 1–3 live in
+bendix. CI workflow is written but the repository has no remote.

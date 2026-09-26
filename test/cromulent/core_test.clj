@@ -53,6 +53,14 @@
     (is (nil? (eg/lookup g [:* (eg/lookup g :a) one])))
     (is (= 3 (eg/node-count g)))))
 
+(deftest packed-keys-fit-a-double
+  ;; op·2^42 + a·2^21 + b: the largest key, every field at its sentinel,
+  ;; is 2^53 − 1, the last integer a JavaScript double holds exactly
+  (is (= 9007199254740991 (eg/packed-key {:+ 2047} :+ 2097151 2097151)))
+  (is (= (+ (* 3 4398046511104) (* 5 2097152) 7) (eg/packed-key {:+ 3} :+ 5 7)))
+  (is (= (+ (* 3 4398046511104) (* 5 2097152) 2097151) (eg/packed-key {:+ 3} :+ 5 nil)) "arity one")
+  (is (nil? (eg/packed-key {} :+ 0 1)) "an operator without an index has no key yet"))
+
 (deftest union-and-congruence
   ;; egg's README example: a*2 = a<<1, so (a*2)/2 = (a<<1)/2 by congruence
   (let [g (eg/egraph)

@@ -9,6 +9,7 @@
   (`npx shadow-cljs compile smoke && node target/smoke.js`)."
   (:require [cromulent.check :as check]
             [cromulent.core :as eg]
+            [cromulent.export :as export]
             [cromulent.extract :as ex]
             [cromulent.pattern :as pat]
             [cromulent.rewrite :as rw]
@@ -145,4 +146,14 @@
      (fact "packed keys: a key round-trips through the memo"
            true
            (let [[g id] (eg/add (eg/egraph) [:+ :x :y])]
-             (= id (eg/lookup g (first (eg/nodes g id))))))]))
+             (= id (eg/lookup g (first (eg/nodes g id))))))
+     (fact "export: the egraph-serialize JSON of 2·x + y is the same text everywhere"
+           (str "{\n  \"nodes\": {\n"
+                "    \"0.0\": {\n      \"op\": \"2\",\n      \"children\": [],\n      \"eclass\": \"0\",\n      \"cost\": 1\n    },\n"
+                "    \"1.0\": {\n      \"op\": \"x\",\n      \"children\": [],\n      \"eclass\": \"1\",\n      \"cost\": 1\n    },\n"
+                "    \"2.0\": {\n      \"op\": \"*\",\n      \"children\": [\"0.0\", \"1.0\"],\n      \"eclass\": \"2\",\n      \"cost\": 3\n    },\n"
+                "    \"3.0\": {\n      \"op\": \"y\",\n      \"children\": [],\n      \"eclass\": \"3\",\n      \"cost\": 1\n    },\n"
+                "    \"4.0\": {\n      \"op\": \"+\",\n      \"children\": [\"2.0\", \"3.0\"],\n      \"eclass\": \"4\",\n      \"cost\": 5\n    }\n"
+                "  },\n  \"root_eclasses\": [\"4\"],\n  \"class_data\": {}\n}")
+           (let [[g id] (eg/add (eg/egraph) [:+ [:* 2 :x] :y])]
+             (export/json g {:cost ex/ast-size :roots [id]})))]))

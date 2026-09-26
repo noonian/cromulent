@@ -1167,6 +1167,19 @@ limit checks in `embiggen`'s order; `finish` returns the result map;
 `embiggen` is the loop over the three, so a caller that steps a run
 from a timer gets exactly the run one call would make, bans and all.
 
+The exporter (2026-09-26, for ../orrery; 57 tests, 250 assertions on
+both runtimes): `cromulent.export`, the e-graph in the egraph-serialize
+JSON format that egg, egglog and the egraphs-good tools share.
+`serialize` gives the data with string keys, `json` the text, and
+`->json` is a printer of its own, so the same text comes out on the
+JVM, on Jolt and in ClojureScript and no runtime prints a ratio; a
+node is named `class.i` in `compare-nodes` order and a child is the
+first node of its class, as egg names them; options give the cost
+function (each node the cost of the cheapest term it heads, when a
+number), the roots, the class data (a bendix graph's polynomials)
+and how operators and leaves print. One smoke fact pins the text of
+`2·x + y` across the three runtimes.
+
 Not yet: explanations, relational e-matching; the AC experiments
 beyond 1–3 live in bendix. CI workflow is written but the repository
 has no remote.

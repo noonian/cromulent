@@ -1159,7 +1159,14 @@ asserted by the suite here and by orrery's node build (all 28 pass,
 54 ms, zero compiler warnings on the engine). The tests and the bench
 stay `.clj`.
 
-Not yet: explanations, relational e-matching; the runner as
-start/step/finish so that a stepped run equals one run under backoff
-(orrery's lesson 5 asks for it); the AC experiments beyond 1–3 live in
-bendix. CI workflow is written but the repository has no remote.
+The runner as start/step/finish (2026-09-25, section 7, for orrery's
+lesson 5; 52 tests, 210 assertions on both runtimes):
+`cromulent.rewrite/start` compiles the rules, initializes the
+scheduler and rebuilds the input; `step` runs one iteration with the
+limit checks in `embiggen`'s order; `finish` returns the result map;
+`embiggen` is the loop over the three, so a caller that steps a run
+from a timer gets exactly the run one call would make, bans and all.
+
+Not yet: explanations, relational e-matching; the AC experiments
+beyond 1–3 live in bendix. CI workflow is written but the repository
+has no remote.

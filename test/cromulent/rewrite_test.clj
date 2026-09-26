@@ -142,6 +142,25 @@
     (is (= (eg/node-count (:egraph simple)) (eg/node-count (:egraph backoff))))
     (is (= (eg/class-count (:egraph simple)) (eg/class-count (:egraph backoff))))))
 
+(deftest stepping-is-the-same-run
+  ;; start/step/finish, stepped by the caller with the backoff
+  ;; scheduler's bans in play, is the run one embiggen call makes
+  (let [[g _] (eg/add (eg/egraph) (sum-of 5))
+        opts {:scheduler :backoff :match-limit 4 :ban-length 2 :timeline? true}
+        one (rw/embiggen g ac-rules opts)
+        stepped (loop [run (rw/start g ac-rules opts), n 0]
+                  (if (:stop-reason run)
+                    (do (is (= run (rw/step run)) "a stopped run is a fixed point")
+                        (assoc (rw/finish run) :steps n))
+                    (recur (rw/step run) (inc n))))
+        strip (fn [res] (-> res (dissoc :ms :steps)
+                            (update :stats (fn [ss] (mapv #(dissoc % :search-ms :apply-ms :rebuild-ms) ss)))))]
+    (is (= (strip one) (strip stepped)))
+    (is (= (:iterations one) (:steps stepped)))
+    (is (= (:egraph one) (:egraph stepped)))
+    (is (nil? (:stop-reason (rw/finish (rw/start g ac-rules opts)))) "not finished yet")
+    (is (= 0 (:iterations (rw/finish (rw/start g ac-rules opts)))))))
+
 (deftest timeline
   (let [[g _] (eg/add (eg/egraph) [:+ 0 [:* 1 :a]])
         {:keys [timeline iterations egraph]} (rw/embiggen g egg-rules {:timeline? true})]

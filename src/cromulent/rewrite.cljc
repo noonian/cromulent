@@ -271,6 +271,95 @@
       (when-not (and (contains? r :lhs) (contains? r :rhs))
         (throw (ex-info "not a rule" {:rule r}))))))
 
+(defn start
+  "A run before its first iteration: rules checked and compiled, the
+  scheduler initialized, g rebuilt. Options as `embiggen` takes them.
+  `step` advances the run one iteration and `finish` turns it into
+  the result map; `embiggen` is the loop over the three. A run holds
+  compiled rules and the scheduler, so it is not plain data; the
+  result of `finish` is. A caller that steps a run itself can pause
+  between iterations, which is what an interactive page needs, and
+  gets exactly the run one `embiggen` call would make, bans and all."
+  ([g rules] (start g rules {}))
+  ([g rules {:keys [scheduler timeline?] :or {scheduler :backoff} :as opts}]
+   (let [rules (vec rules)
+         _ (check-rules rules)
+         rules (mapv compile-rule rules)
+         cells (mapv (fn [r] (when-not (fn? (:lhs r)) (atom (long-array 1024)))) rules)
+         sched (resolve-scheduler scheduler opts)
+         t0 (platform/now-ms)
+         g (eg/rebuild g)]
+     {:egraph g :rules rules :cells cells :sched sched
+      :state ((:init sched) rules opts) :opts opts :t0 t0
+      :stats [] :timeline (when timeline? [g]) :stop-reason nil})))
+
+(defn step
+  "One iteration of run, or run itself once it has a :stop-reason.
+  The limits are checked as `embiggen` checks them: iterations and
+  time before the iteration, saturation and the node limit after it."
+  [{:keys [egraph rules cells sched state opts t0 stats stop-reason] :as run}]
+  (let [{:keys [iter-limit node-limit time-limit-ms check timeline?]
+         :or {iter-limit 30 node-limit 10000 time-limit-ms 5000}} opts
+        iter (inc (count stats))
+        g egraph]
+    (cond
+      stop-reason run
+      (> iter iter-limit) (assoc run :stop-reason :iter-limit)
+      (> (- (platform/now-ms) t0) time-limit-ms) (assoc run :stop-reason :time-limit)
+      :else
+      (let [t-search (platform/now-ms)
+            [state found] (reduce (fn [[state found] [rule cell]]
+                                    (let [[state ms] ((:search sched) state iter rule
+                                                      #(search-rule g rule cell))]
+                                      [state (conj found ms)]))
+                                  [state []]
+                                  (map vector rules cells))
+            t-apply (platform/now-ms)
+            [g' applied] (reduce (fn [[g' applied] [rule ms]]
+                                   (let [[g' n] (if (map? ms)
+                                                  (apply-flat g g' rule (:buf ms) (:n ms))
+                                                  (apply-rule g g' rule ms))
+                                         g' (if (and check (pos? n))
+                                              (let [g' (eg/rebuild g')]
+                                                (when-let [problem (check g')]
+                                                  (throw (ex-info (str "rule " (:name rule) " failed the check")
+                                                                  {:rule (:name rule) :problem problem})))
+                                                g')
+                                              g')]
+                                     [g' (assoc applied (:name rule) n)]))
+                                 [g {}]
+                                 (map vector rules found))
+            t-rebuild (platform/now-ms)
+            g' (eg/rebuild g')
+            t-end (platform/now-ms)
+            nodes (eg/node-count g')
+            stat (merge {:iter iter :nodes nodes :classes (eg/class-count g')
+                         :matches (zipmap (map :name rules) (map match-count found))
+                         :applied applied
+                         :search-ms (- t-apply t-search)
+                         :apply-ms (- t-rebuild t-apply)
+                         :rebuild-ms (- t-end t-rebuild)}
+                        (when-let [report (:report sched)] (report state iter)))
+            ;; the scheduler is only asked whether it can stop when
+            ;; nothing was applied, as in egg: that is when backoff
+            ;; releases its bans instead of declaring saturation
+            [state can-stop?] (if (every? zero? (vals applied))
+                                ((:can-stop sched) state iter)
+                                [state false])]
+        (cond-> (assoc run :egraph g' :state state :stats (conj stats stat))
+          timeline? (update :timeline conj g')
+          can-stop? (assoc :stop-reason :saturated)
+          (and (not can-stop?) (> nodes node-limit)) (assoc :stop-reason :node-limit))))))
+
+(defn finish
+  "The result map of run: {:egraph g' :iterations n :stop-reason r
+  :stats [...] :ms t}, plus :timeline when the run kept one. A run
+  that has not stopped has :stop-reason nil."
+  [{:keys [egraph stats stop-reason timeline t0]}]
+  (cond-> {:egraph egraph :iterations (count stats) :stop-reason stop-reason
+           :stats stats :ms (- (platform/now-ms) t0)}
+    timeline (assoc :timeline timeline)))
+
 (defn embiggen
   "Saturate g under rules. Options and their defaults:
 
@@ -291,72 +380,11 @@
   {:iter i :nodes n :classes m :matches {name k} :applied {name k}
    :search-ms :apply-ms :rebuild-ms} plus whatever the scheduler
   reports. With :timeline?, :timeline holds the e-graph before the
-  first iteration and after each one."
+  first iteration and after each one. `start`, `step` and `finish`
+  are the three pieces of this loop, for a caller that steps."
   ([g rules] (embiggen g rules {}))
-  ([g rules {:keys [iter-limit node-limit time-limit-ms scheduler timeline? check]
-             :or {iter-limit 30 node-limit 10000 time-limit-ms 5000 scheduler :backoff}
-             :as opts}]
-   (let [rules (vec rules)
-         _ (check-rules rules)
-         rules (mapv compile-rule rules)
-         cells (mapv (fn [r] (when-not (fn? (:lhs r)) (atom (long-array 1024)))) rules)
-         sched (resolve-scheduler scheduler opts)
-         t0 (platform/now-ms)
-         g (eg/rebuild g)
-         result (fn [g stats timeline reason]
-                  (cond-> {:egraph g :iterations (count stats) :stop-reason reason
-                           :stats stats :ms (- (platform/now-ms) t0)}
-                    timeline? (assoc :timeline timeline)))]
-     (loop [g g, state ((:init sched) rules opts), stats [], timeline [g]]
-       (let [iter (inc (count stats))]
-         (cond
-           (> iter iter-limit) (result g stats timeline :iter-limit)
-           (> (- (platform/now-ms) t0) time-limit-ms) (result g stats timeline :time-limit)
-           :else
-           (let [t-search (platform/now-ms)
-                 [state found] (reduce (fn [[state found] [rule cell]]
-                                         (let [[state ms] ((:search sched) state iter rule
-                                                           #(search-rule g rule cell))]
-                                           [state (conj found ms)]))
-                                       [state []]
-                                       (map vector rules cells))
-                 t-apply (platform/now-ms)
-                 [g' applied] (reduce (fn [[g' applied] [rule ms]]
-                                        (let [[g' n] (if (map? ms)
-                                                       (apply-flat g g' rule (:buf ms) (:n ms))
-                                                       (apply-rule g g' rule ms))
-                                              g' (if (and check (pos? n))
-                                                   (let [g' (eg/rebuild g')]
-                                                     (when-let [problem (check g')]
-                                                       (throw (ex-info (str "rule " (:name rule) " failed the check")
-                                                                       {:rule (:name rule) :problem problem})))
-                                                     g')
-                                                   g')]
-                                          [g' (assoc applied (:name rule) n)]))
-                                      [g {}]
-                                      (map vector rules found))
-                 t-rebuild (platform/now-ms)
-                 g' (eg/rebuild g')
-                 t-end (platform/now-ms)
-                 nodes (eg/node-count g')
-                 stat (merge {:iter iter :nodes nodes :classes (eg/class-count g')
-                              :matches (zipmap (map :name rules) (map match-count found))
-                              :applied applied
-                              :search-ms (- t-apply t-search)
-                              :apply-ms (- t-rebuild t-apply)
-                              :rebuild-ms (- t-end t-rebuild)}
-                             (when-let [report (:report sched)] (report state iter)))
-                 stats (conj stats stat)
-                 timeline (if timeline? (conj timeline g') timeline)
-                 ;; the scheduler is only asked whether it can stop when
-                 ;; nothing was applied, as in egg: that is when backoff
-                 ;; releases its bans instead of declaring saturation
-                 [state can-stop?] (if (every? zero? (vals applied))
-                                     ((:can-stop sched) state iter)
-                                     [state false])]
-             (cond
-               can-stop? (result g' stats timeline :saturated)
-               (> nodes node-limit) (result g' stats timeline :node-limit)
-               :else (recur g' state stats timeline)))))))))
+  ([g rules opts]
+   (finish (loop [run (start g rules opts)]
+             (if (:stop-reason run) run (recur (step run)))))))
 
 (def saturate "Alias of `embiggen`." embiggen)

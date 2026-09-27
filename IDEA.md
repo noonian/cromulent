@@ -734,6 +734,30 @@ the stale filter stand as the next rows, in that order.
   than per operator: 1.07 nodes per union here; nothing to gain until
   the AC experiments merge large classes.
 
+### Measured: Jolt 0.8.13 (2026-09-27)
+
+The same AC-10 run, over the same hot path as the run measured
+above. Each figure is the median of three runs of the runner's
+`:stats` after a warm-up (ac-sum 8), on the same machine as before:
+
+| phase | JVM 09-25 | JVM now | Jolt 0.8.12 (09-25) | Jolt 0.8.13 | lambda-microegg |
+|---|---|---|---|---|---|
+| search | 551 ms | 556 ms | 1 361 ms | 1 369 ms | 350 ms |
+| apply | 2 337 ms | 2 245 ms | 4 498 ms | 3 913 ms | 1 000 ms |
+| rebuild | 711 ms | 641 ms | 1 152 ms | 986 ms | 152 ms |
+| total | 3 632 ms | 3 481 ms | 7 050 ms | 6 262 ms | about 1 500 ms |
+
+Jolt is 11% faster in total. Apply is 13% faster and rebuild 14%;
+search did not move, so the gain is in the applied path and the
+unions. The code did not change, so the upgrade is the likely
+cause, but 0.8.12 was not rerun beside it. The JVM is within noise of
+its earlier run. Against lambda-microegg, the JVM is 2.3 times slower
+and Jolt 4.2 times, where the first measurement of this section read
+5.1 and 14.4. Rebuild is now the furthest phase on both runtimes,
+4.2 and 6.5 times. The lambda-microegg figures come from its
+author's machine, so only the ratios between this project's own
+columns compare like with like.
+
 ### What persistence still buys, unchanged
 
 - **Timelines.** `(saturate eg rules {:timeline? true})` retains the
@@ -1092,21 +1116,24 @@ v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
 - `bench/` — deterministic across runtimes (identical node and class
   counts); JVM numbers include JIT warm-up; nothing is tuned:
 
-  | fixture | n | JVM | Jolt 0.8.12 |
+  | fixture | n | JVM | Jolt 0.8.13 |
   |---|---|---|---|
-  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 219 ms | 341 ms |
-  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 26 ms | 21 ms |
-  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 14 ms | 15 ms |
-  | union + rebuild (random unions on the above) | 2 000 | 110 ms | 140 ms |
-  | extract, cost table for every class of the above | 35 967 | 53 ms | 81 ms |
-  | embiggen, egg README rules on the above, 2 iterations (→ 45 282 nodes, 22 871 classes) | 2 | 802 ms | 1 315 ms |
-  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 10 ms | 20 ms |
-  | ac-sum, saturate a 7-atom sum under comm + assoc (127 classes, 1 939 nodes, 8 iterations) | 7 | 52 ms | 100 ms |
-  | ac-sum, the same with 8 atoms (255 classes, 6 058 nodes, 9 iterations) | 8 | 175 ms | 418 ms |
-  | ac-sum, 10 atoms (1 023 classes, 57 012 nodes, 10 iterations): the yardstick of section 5 | 10 | 3 287 ms | 7 060 ms |
+  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 210 ms | 287 ms |
+  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 24 ms | 20 ms |
+  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 12 ms | 13 ms |
+  | union + rebuild (random unions on the above) | 2 000 | 111 ms | 104 ms |
+  | extract, cost table for every class of the above | 35 967 | 50 ms | 70 ms |
+  | embiggen, egg README rules on the above, 2 iterations (→ 45 282 nodes, 22 871 classes) | 2 | 822 ms | 1 105 ms |
+  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 8 ms | 17 ms |
+  | ac-sum, saturate a 7-atom sum under comm + assoc (127 classes, 1 939 nodes, 8 iterations) | 7 | 49 ms | 85 ms |
+  | ac-sum, the same with 8 atoms (255 classes, 6 058 nodes, 9 iterations) | 8 | 175 ms | 360 ms |
+  | ac-sum, 10 atoms (1 023 classes, 57 012 nodes, 10 iterations): the yardstick of section 5 | 10 | 3 414 ms | 6 379 ms |
 
-  Measured 2026-09-25 after the second pass (flat match buffers and
-  the register program, section 5) landed. After the first pass
+  Measured 2026-09-27 on Jolt 0.8.13 (section 5 compares it with
+  0.8.12). On 2026-09-25, after the second pass (flat match buffers
+  and the register program, section 5) landed, on Jolt 0.8.12: egg
+  rules 802 and 1 315 ms, ac-sum 7 52 and 100, ac-sum 8 175 and 418,
+  ac-sum 10 3 287 and 7 060. After the first pass
   alone, compiled patterns and packed keys: egg rules 747 and
   1 380 ms, ac-sum 7 64 and 137, ac-sum 8 246 and 623, ac-sum 10
   5 047 and 11 745; before both, on the same machine: ematch 57 and

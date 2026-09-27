@@ -95,25 +95,26 @@ rebuilt e-graph satisfies.
 ```
 clojure -M:test     jolt -M:test     jolt test      # the suite, either runtime
 clojure -M:bench    jolt -M:bench                   # throughput fixtures
-cd ../orrery && npm run smoke                       # the same facts on node
+cd ../orrery && npm run smoke:local                 # the same facts on node
 ```
 
 ## Portability
 
 The library is `.cljc` and compiles unchanged for ClojureScript
-(orrery, the explorer, builds it with shadow-cljs). `cromulent.platform`
-is the one file that knows the runtime, the clock; the two `catch`
-clauses in `cromulent.rewrite` are the only other reader conditionals.
-The hashcons key is `op·2^42 + a·2^21 + b`, under 2^53 so that it is
-exact in a JavaScript double as well as a fixnum on Chez and a long on
-the JVM; an e-graph therefore holds at most 2 048 operators and
-2 097 150 class ids, and either overflow throws. `cromulent.smoke`
-(under `test/`) is a vector of runtime-stable facts about fixed runs,
-asserted by the suite on the JVM and Jolt and by orrery's node build
-on ClojureScript: class and node counts, iterations, stop reasons,
-per-rule counts and costs are identical on the three runtimes. Root
-ids and tied extractions are not: hash iteration order differs per
-runtime, so a term is asserted across runtimes only when its cost is
-a unique minimum. The test suites and the bench stay JVM and Jolt.
+([orrery](https://github.com/noonian/orrery), the explorer, builds it
+with shadow-cljs). `cromulent.platform` is the one file that knows the
+runtime, the clock; the two `catch` clauses in `cromulent.rewrite` are
+the only other reader conditionals. The hashcons key is `op·2^42 +
+a·2^21 + b`, under 2^53 so that it is exact in a JavaScript double as
+well as a fixnum on Chez and a long on the JVM; an e-graph therefore
+holds at most 2 048 operators and 2 097 150 class ids, and either
+overflow throws. `cromulent.smoke` (under `src/`) is a vector of
+runtime-stable facts about fixed runs, asserted by the suite on the
+JVM and Jolt and by orrery's node build on ClojureScript: class and
+node counts, iterations, stop reasons, per-rule counts and costs are
+identical on the three runtimes. Root ids and tied extractions are
+not: hash iteration order differs per runtime, so a term is asserted
+across runtimes only when its cost is a unique minimum. The test
+suites and the bench stay JVM and Jolt.
 
 [IDEA.md](IDEA.md) is the design and status.

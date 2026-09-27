@@ -1,5 +1,8 @@
 (ns cromulent.gen
-  "Generators and script runner shared by the test namespaces."
+  "Generators and script runner shared by cromulent's tests and
+  bendix's. It lives in src so that bendix gets it from the dependency,
+  and it needs org.clojure/test.check on the classpath, which cromulent
+  itself does not depend on."
   (:require [clojure.test.check.generators :as gen]
             [cromulent.core :as eg]
             [cromulent.term :as term]))

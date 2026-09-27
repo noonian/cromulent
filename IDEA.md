@@ -979,7 +979,7 @@ Constant folding is the degenerate case.
 - Acceptance examples from the egg README.
 - Both runtimes in CI from day one; benchmarks in `bench/` from the
   first milestone.
-- **The third runtime**: `cromulent.smoke` (`test/`, `.cljc`) is a
+- **The third runtime**: `cromulent.smoke` (`src/`, `.cljc`) is a
   vector of runtime-stable facts about fixed runs, plain data;
   `cromulent.smoke-test` asserts it on the JVM and Jolt, and orrery's
   node build (`npm run smoke` in ../orrery) prints the same rows on

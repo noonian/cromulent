@@ -22,7 +22,7 @@ is `embiggen`; extraction, which pulls the best term out, may be
 ## 0. Principles
 
 - **Performance over ergonomics, both where possible; pragmatic
-  idioms.** (Captain's direction, 2026-09-13.) The public API is pure
+  idioms.** (Decided 2026-09-13.) The public API is pure
   values in, pure values out.
 - **Do not optimize everything from the start.** The design and the
   core data structures must *support* performance: dense ids so
@@ -235,8 +235,8 @@ analysis change strictly climbs a finite lattice. Same argument as egg.
 
 The persistent value is the API and, in v1, the implementation. Every
 performance option is adopted or rejected by a row in `bench/` on
-both runtimes, and Jolt is the primary target (the Captain's own
-usage, 2026-09-25): a change must pay on Jolt. Nothing earlier in
+both runtimes, and Jolt is the primary target (the author's own
+runtime, 2026-09-25): a change must pay on Jolt. Nothing earlier in
 this section is canon. It is re-derived from measurement each time a
 row points here, and it was on 2026-09-25, when the plan that stood
 before (arrays and a scoped working copy) did not survive Jolt's
@@ -260,8 +260,9 @@ thousand of them applied):
 | rebuild | 633 ms | 1 039 ms | 152 ms |
 | total | 7 595 ms | 21 543 ms | about 1 500 ms |
 
-Two facts locate the cost. Search is read-only and is the worst phase
-by ratio; rebuild, where every persistent write happens, is the best.
+Two facts located the cost in this run. Search writes nothing and was
+the worst phase by ratio; rebuild, where every persistent write
+happens, was the best.
 Iterations 9 and 10 change nothing, the graph being saturated, and
 cost 3.4 s of the 7.6 on the JVM and 10.3 s of the 21.5 on Jolt. A
 sampling profile of the JVM run, self time by the nearest function of
@@ -275,6 +276,12 @@ cost. The cost is the per-operation constant of building and hashing
 a fresh vector key at every hashcons lookup, and an interpreted,
 seq-based matcher; a mutable Clojure written the same way would keep
 both.
+
+The later passes below reversed the ranking. In the 2026-09-27 run
+("Measured: Jolt 0.8.13"), search is 1.6 times lambda-microegg's on
+the JVM, and rebuild is the furthest phase on both runtimes, 4.2 and
+6.5 times. No profile of rebuild has been taken since, so whether
+the persistent writes explain that gap is an open question.
 
 ### Measured: the primitives (2026-09-25)
 
@@ -491,7 +498,7 @@ hash-array-mapped trie shifts and masks the hash at every level, so
 the shift cost compounds. If Jolt is ours to change, these are the
 highest-leverage fixes for every program on it, and the design above
 stands after them: a packed key hashes one fixnum instead of three
-values and allocates nothing. Open question for the Captain.
+values and allocates nothing. An open question.
 
 ### Measured: the apply phase, second pass (2026-09-25)
 
@@ -1030,7 +1037,7 @@ Constant folding is the degenerate case.
   "Answered on the way").
 - One key layout or two, for ClojureScript: measured 2026-09-25, one
   (section 5, decision 2).
-- **Retiring the packed key** (the Captain's question, 2026-09-25):
+- **Retiring the packed key** (asked 2026-09-25):
   keying the memo by the canonical node itself would remove `:ops`,
   `:op-names`, `:memo-other` and the two limits. The second pass
   found "the packed key is not the cost" about its shape; what it

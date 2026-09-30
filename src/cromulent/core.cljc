@@ -268,9 +268,10 @@
   (reduce-kv (fn [w _ pid] (conj w pid)) worklist parents))
 
 (defn add-node
-  "Add one e-node whose children are class ids. Returns [eg' id]. The
-  node is canonicalized first; an equal node already present returns
-  its class instead of adding anything."
+  "Add one e-node whose children are class ids. Returns [eg' id], id
+  the canonical id of its class. The node is canonicalized first; an
+  equal node already present returns its class instead of adding
+  anything."
   [eg node]
   (let [node (canonicalize eg node)]
     (if-let [id (memo-get eg node)]
@@ -291,7 +292,9 @@
                              (term/children node))
                      (update-in [:by-op (term/operator node)] (fnil conj #{}) id))
                  eg)]
-        [(run-modify eg id) id]))))
+        ;; a modify may union the new class into another
+        (let [eg (run-modify eg id)]
+          [eg (find eg id)])))))
 
 (defn lookup
   "The canonical id of the class holding node (children are class
@@ -358,7 +361,9 @@
                        (not= data (:data cb)) (update :analysis-pending push-parent-classes (:parents cb)))
                      (run-reconcile ra [(:data ca) (:data cb)]))
                  eg)]
-        [(run-modify eg ra) ra]))))
+        ;; a modify may union ra into another class
+        (let [eg (run-modify eg ra)]
+          [eg (find eg ra)])))))
 
 (defn- process-pending
   "Drain the congruence worklist: re-key each queued parent node under

@@ -168,6 +168,48 @@
     (is (= 6 (eg/data g x2 :const-fold)))
     (is (= (eg/find g x2) (eg/find g six)) "the parent folds once its child is known")))
 
+(deftest add-returns-the-root-after-modify
+  ;; 2*3 folds into the class of 6, which is the larger, so the new
+  ;; class is not the root that survives
+  (let [g (eg/egraph {:analysis const-fold})
+        [g six] (eg/add g 6)
+        [g x]   (eg/add g :x)
+        [g _]   (eg/union g six x)
+        g (eg/rebuild g)
+        [g id]  (eg/add g [:* 2 3])
+        [g id'] (eg/add g [:* 2 3])]
+    (is (eg/root? g id))
+    (is (= (eg/find g six) id))
+    (is (= id id') "the same term twice is one id")))
+
+(def magnet
+  "Pulls every class holding :hot into the class of :sink, once :sink exists."
+  {:name :magnet
+   :make (fn [_ node _] (= :hot node))
+   :merge (fn [_ a b] (or a b))
+   :modify (fn [g id]
+             (let [sink (eg/lookup g :sink)]
+               (if (and (eg/data g id :magnet) sink)
+                 (first (eg/union g id sink))
+                 g)))})
+
+(deftest union-returns-the-root-after-modify
+  ;; the union gives :p the data of :hot, and modify pulls the class into
+  ;; the larger class of :sink, so :p is not the root that survives
+  (let [g (eg/egraph {:analysis magnet})
+        [g hot] (eg/add g :hot)
+        [g p]   (eg/add g :p)
+        [g sink] (eg/add g :sink)
+        [g s1]  (eg/add g :s1)
+        [g s2]  (eg/add g :s2)
+        [g _]   (eg/union g sink s1)
+        [g _]   (eg/union g sink s2)
+        [g r]   (eg/union g p hot)
+        g (eg/rebuild g)]
+    (ok? g)
+    (is (eg/root? g r))
+    (is (= (eg/find g sink) r) ":p and :hot land in the larger class of :sink")))
+
 ;; ---------------------------------------------------------------------------
 ;; property tests
 

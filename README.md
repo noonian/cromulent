@@ -5,6 +5,16 @@ the JVM and ClojureScript from one source. The data structure of equality
 saturation, as a value: every operation returns a new e-graph and
 leaves the old one intact.
 
+**Status: a toy.** cromulent is a vehicle for learning and
+experimentation, built largely with an LLM. Nothing about its API or
+performance is promised; do not build on it. If you want an e-graph in
+Clojure for real work, look first at
+[ansatz](https://github.com/replikativ/ansatz), whose `grind` tactic
+ships a persistent e-graph with congruence closure and e-matching
+inside a Lean-4-style verified programming library, and at
+[egg](https://egraphs-good.github.io/) for the reference
+implementation of the ideas this one follows.
+
 ```clojure
 (require '[cromulent.core :as eg])
 

@@ -34,6 +34,22 @@
   union changed the partition and the scheduler has nothing held
   back) or when it hits an iteration, node or time limit.
 
+  A match that a rule has applied is not applied again. A pattern
+  rule with a pattern right-hand side and no guard says the same thing
+  about a match every time, and what it said still holds, because
+  classes only grow. So from its second search on, such a rule's
+  search writes only the fresh matches, those with a node that was
+  added, moved to another class or re-keyed since the rule last
+  applied its matches (the e-graph stamps its nodes with an epoch the
+  runner advances every iteration); the rest are counted and skipped.
+  The count the scheduler and `:stats` see is of every match found,
+  as before, and the e-graph after each iteration has the same classes
+  and nodes as it would without the skipping. `:applied` can differ
+  either way: it counts the merges made while applying, and whether
+  an application makes a merge or finds it made depends on what was
+  applied before it. `:skip-stale? false` applies every match every
+  time.
+
   Schedulers decide which of a rule's matches an iteration applies.
   `simple-scheduler` applies them all; `backoff-scheduler` is egg's:
   a rule whose match count exceeds its budget is banned for a number
@@ -78,13 +94,15 @@
 ;;  :report   (fn [state iter] map)}          ; optional; merged into the iteration's stats
 ;;
 ;; matches is whatever the thunk returned (a vector of match maps for a
-;; searcher, a flat buffer for a pattern rule; `match-count` counts
-;; either), or [] to apply none.
+;; searcher; for a pattern rule a flat buffer, {:buf :n :found}, :n of
+;; the :found matches being written in it for apply; `match-count`
+;; counts either), or [] to apply none.
 
 (defn match-count
-  "How many matches a search returned."
+  "How many matches a search found. For a pattern rule that is every
+  match, the ones skipped as already applied included."
   [ms]
-  (if (map? ms) (:n ms) (count ms)))
+  (if (map? ms) (:found ms) (count ms)))
 
 (defn- times-pow2
   "x·2^n by doubling: a shift is 32-bit in JavaScript and slow on
@@ -159,17 +177,27 @@
                :else (pat/compile rhs (:vars lhs')))]
     (assoc r :lhs lhs' :rhs rhs')))
 
+(defn- repeats-itself?
+  "Does rule say the same thing about a match whenever it is applied?
+  A pattern on both sides and no guard: nothing it does reads the
+  e-graph's analysis data or anything else that changes."
+  [{:keys [lhs rhs], guard :when}]
+  (and (not (fn? lhs)) (some? rhs) (not (fn? rhs)) (nil? guard)))
+
 (defn- search-rule
   "Every match of rule in g: a searcher's vector of match maps, or for
-  a pattern {:buf long-array :n count}, the matches flat in the buffer
-  that cell holds (cromulent.pattern/ematch-flat), which grows in
-  place across the run."
-  [g {:keys [lhs]} cell]
+  a pattern {:buf long-array :n count :found count}, the matches flat
+  in the buffer that cell holds (cromulent.pattern/ematch-flat), which
+  grows in place across the run. since is the epoch of the e-graph the
+  rule last applied all its matches to, or nil: a rule that repeats
+  itself gets only the :n matches that are fresh since then, of the
+  :found there are."
+  [g {:keys [lhs] :as rule} cell since]
   (if (fn? lhs)
     (lhs g)
-    (let [[buf n] (pat/ematch-flat g lhs @cell)]
+    (let [[buf n found] (pat/ematch-flat g lhs @cell (when (repeats-itself? rule) since))]
       (reset! cell buf)
-      {:buf buf :n n})))
+      {:buf buf :n n :found found})))
 
 (defn- apply-rule
   "Apply every match map of rule to g. snapshot is the e-graph the
@@ -290,16 +318,16 @@
          t0 (platform/now-ms)
          g (eg/rebuild g)]
      {:egraph g :rules rules :cells cells :sched sched
-      :state ((:init sched) rules opts) :opts opts :t0 t0
+      :state ((:init sched) rules opts) :opts opts :t0 t0 :seen {}
       :stats [] :timeline (when timeline? [g]) :stop-reason nil})))
 
 (defn step
   "One iteration of run, or run itself once it has a :stop-reason.
   The limits are checked as `embiggen` checks them: iterations and
   time before the iteration, saturation and the node limit after it."
-  [{:keys [egraph rules cells sched state opts t0 stats stop-reason] :as run}]
-  (let [{:keys [iter-limit node-limit time-limit-ms check timeline?]
-         :or {iter-limit 30 node-limit 10000 time-limit-ms 5000}} opts
+  [{:keys [egraph rules cells sched state opts t0 stats stop-reason seen] :as run}]
+  (let [{:keys [iter-limit node-limit time-limit-ms check timeline? skip-stale?]
+         :or {iter-limit 30 node-limit 10000 time-limit-ms 5000 skip-stale? true}} opts
         iter (inc (count stats))
         g egraph]
     (cond
@@ -309,11 +337,18 @@
       :else
       (let [t-search (platform/now-ms)
             [state found] (reduce (fn [[state found] [rule cell]]
-                                    (let [[state ms] ((:search sched) state iter rule
-                                                      #(search-rule g rule cell))]
+                                    (let [since (when skip-stale? (get seen (:name rule)))
+                                          [state ms] ((:search sched) state iter rule
+                                                      #(search-rule g rule cell since))]
                                       [state (conj found ms)]))
                                   [state []]
                                   (map vector rules cells))
+            ;; a pattern rule whose matches came back from the scheduler
+            ;; is about to apply every match of g that it has not applied
+            seen (reduce (fn [seen [rule ms]]
+                           (if (map? ms) (assoc seen (:name rule) (:epoch g)) seen))
+                         seen
+                         (map vector rules found))
             t-apply (platform/now-ms)
             [g' applied] (reduce (fn [[g' applied] [rule ms]]
                                    (let [[g' n] (if (map? ms)
@@ -327,10 +362,13 @@
                                                 g')
                                               g')]
                                      [g' (assoc applied (:name rule) n)]))
-                                 [g {}]
+                                 ;; whatever changes from here is stamped after g
+                                 [(eg/next-epoch g) {}]
                                  (map vector rules found))
             t-rebuild (platform/now-ms)
             g' (eg/rebuild g')
+            ;; an iteration that added no node and merged no class leaves g as it was
+            g' (if (identical? (:uf g') (:uf g)) g g')
             t-end (platform/now-ms)
             nodes (eg/node-count g')
             stat (merge {:iter iter :nodes nodes :classes (eg/class-count g')
@@ -346,7 +384,7 @@
             [state can-stop?] (if (every? zero? (vals applied))
                                 ((:can-stop sched) state iter)
                                 [state false])]
-        (cond-> (assoc run :egraph g' :state state :stats (conj stats stat))
+        (cond-> (assoc run :egraph g' :state state :seen seen :stats (conj stats stat))
           timeline? (update :timeline conj g')
           can-stop? (assoc :stop-reason :saturated)
           (and (not can-stop?) (> nodes node-limit)) (assoc :stop-reason :node-limit))))))
@@ -370,6 +408,9 @@
     :match-limit   1000     backoff: matches per rule per iteration
     :ban-length    5        backoff: iterations
     :timeline?     false    keep the e-graph after every iteration
+    :skip-stale?   true     do not apply again a match a rule has applied
+                            (pattern rules with a pattern right-hand side
+                            and no guard; see the namespace doc)
     :check         nil      (fn [g] problem-or-nil): a dev-mode oracle run on the
                             rebuilt e-graph after each rule's applications;
                             a problem throws ex-info naming the rule

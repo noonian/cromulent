@@ -76,7 +76,11 @@ cheapest term out of a class:
 Each iteration searches every rule against the same e-graph, applies
 every match, then rebuilds, so the result does not depend on rule
 order. Guards and computed right-hand sides see the e-graph the
-search ran on. The default scheduler is egg's backoff (`:scheduler
+search ran on. A rule that is a pattern on both sides with no guard
+does not apply a match twice: after its first search it applies only
+the matches with a node that has changed since it last ran, and the
+e-graph after each iteration is the same as if it applied them all
+(`:skip-stale? false` does). The default scheduler is egg's backoff (`:scheduler
 :simple` applies everything, every iteration); `:stats` has per-rule
 match and application counts and phase timings for every iteration,
 and `:timeline? true` keeps every intermediate e-graph. Cost

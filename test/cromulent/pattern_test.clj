@@ -69,6 +69,42 @@
     (is (= #{r} (get (:by-op g) :*)))
     (is (empty? (check/violations (eg/rebuild g))))))
 
+(defn- flat
+  "[matches found] of p in g as `ematch-flat` gives them: the matches
+  it wrote, each [class binding ...], as a set, and how many it found."
+  [g p since]
+  (let [[^longs buf n found] (pat/ematch-flat g p (long-array 4) since)
+        stride (inc (count (:vars (pat/compile p))))]
+    [(set (for [m (range n)] (mapv #(aget buf (+ (* m stride) %)) (range stride)))) found]))
+
+(deftest fresh-matches
+  ;; f(g(x)) and f(g(y)), and a g(z) and an f(w) that do not meet, all
+  ;; of epoch 0: two matches of f(g(?a))
+  (let [p '[:f [:g ?a]]
+        g (reduce (fn [g t] (first (eg/add g t))) (eg/egraph) [[:f [:g :x]] [:f [:g :y]] [:g :z] [:f :w]])
+        {x :x, y :y, z :z, w :w, fgx [:f [:g :x]], fgy [:f [:g :y]], gz [:g :z], fw [:f :w]}
+        (ids g :x :y :z :w [:f [:g :x]] [:f [:g :y]] [:g :z] [:f :w])]
+    (is (= [#{[fgx x] [fgy y]} 2] (flat g p nil)) "every match, when no epoch is given")
+    (is (= [#{} 2] (flat g p 0)) "nothing has changed since epoch 0")
+    ;; epoch 1: w = g(z), so f(w) reads f(g(z)) now; and f(g(v)) is new
+    (let [g1 (eg/rebuild (first (eg/union (eg/next-epoch g) w gz)))
+          [g1 fgv] (eg/add g1 [:f [:g :v]])
+          v (eg/lookup g1 :v)]
+      (is (empty? (check/violations g1)))
+      (is (= 4 (count (pat/ematch g1 p))))
+      (is (= [#{[(eg/find g1 fw) z] [fgv v]} 4] (flat g1 p 0))
+          "the match a union made and the match of new nodes; the two old ones are counted and not written")
+      (is (= [#{} 4] (flat g1 p 1)) "and after epoch 1, none"))))
+
+(deftest a-leaf-that-moved-makes-a-match-fresh
+  (let [p '[:f 0]
+        [g fw] (eg/add (eg/egraph) [:f :w])
+        [g zero] (eg/add g 0)
+        g1 (eg/rebuild (first (eg/union (eg/next-epoch g) (eg/lookup g :w) zero)))]
+    (is (= [#{} 0] (flat g p 0)))
+    (is (= [#{[fw]} 1] (flat g1 p 0)) "f(w) reads f(0) since 0 joined the class of w")
+    (is (= [#{} 1] (flat g1 p 1)))))
+
 (deftest instantiate-reuses-and-adds
   (let [g (-> (eg/egraph) (eg/add [:* :a 2]) first)
         a (cg/id-of g :a)

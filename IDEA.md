@@ -130,12 +130,15 @@ naming a node.
                    ;;                     :members [id ...]         ; every id that names the class
                    ;;                     :nodes   {id e-node ...}  ; its e-nodes, by node id
                    ;;                     :parents #{id ...}        ; nodes with this class as a child
-                   ;;                     :data    {name data}}     ; analysis data
+                   ;;                     :data    {name data}      ; analysis data
+                   ;;                     :stamp   epoch}           ; when a node of it last changed
                    ;;          nil for non-roots
  :by-op    {}      ;; operator -> #{root ids} whose class holds a node with that operator
  :pending  []      ;; ids of nodes to re-key in :memo and rewrite in their class (the rebuild worklist)
  :analysis-pending []  ;; ids whose class data must be re-made
  :dirty?   false   ;; a union has happened since the last rebuild
+ :epoch    0       ;; a counter the caller advances (`next-epoch`); the runner does, every iteration
+ :stamps   []      ;; vector, node id -> the epoch in which the node was added, moved or re-keyed
  :analyses []      ;; analysis maps (section 9)
  :analysis-state {}}   ;; analysis name -> whatever that analysis keeps
 ```
@@ -176,8 +179,10 @@ operation:
    class's operators to the surviving root as it merges.
 8. Every entry of `:uf` points directly at its root. This one too
    holds at all times: `union` repoints the merged class's members.
+9. Every node's stamp is an epoch no later than the e-graph's, and no
+   node is stamped later than its class. At all times.
 
-Between `union` and `rebuild` only 1, 7 and 8 hold; that is the
+Between `union` and `rebuild` only 1, 7, 8 and 9 hold; that is the
 deferred rebuilding trade and it is what makes saturation fast.
 
 ## 4. Core operations
@@ -891,6 +896,88 @@ of them for AC-10's 1 023 classes; a count kept by `add-node` and
 `union` would make the second free. Transients over apply stand where
 they stood.
 
+### Measured: stale matches skipped (2026-10-05)
+
+The second pass (09-25, "Stale matches") found that most matches of a
+late iteration were applied in an earlier one, 62% over the AC-10 run,
+and deferred the form that pays: a stamp per node, read by the matcher
+as it visits. Node ids made it cheap, so it is built.
+
+**The rule.** The e-graph carries an epoch that the runner advances
+each iteration before it applies anything, and a stamp per node: the
+epoch in which the node was added, was moved into another class by a
+union, or was re-keyed by `rebuild`. Those are the three places the
+core writes a node already. A match is *fresh* since an epoch when one
+of its nodes is stamped after it, and stale otherwise. A stale match
+was a match of the same class under the same bindings when that epoch
+ended: its nodes read as they did and sit where they sat, and two
+nodes that were not beside each other become so only when the class
+of one loses a union, which moves that node, or the class the other
+points at does, which re-keys it. A leaf of the pattern counts as a
+node; it is not walked, so its stamp is read by its id. What a rule
+said about a match still holds, classes only growing, so a rule need
+not say it twice.
+
+**Which rules.** A pattern on both sides and no guard: such a rule
+reads nothing that changes. A guard, a computed right-hand side or a
+searcher is applied to every match as before. A rule's threshold is
+the epoch of the e-graph it last applied all its matches to, so a
+rule that backoff banned, or whose matches it dropped, keeps its old
+one. `:skip-stale? false` turns the skipping off.
+
+**What does not change.** The matcher still walks every match and
+counts it; only the fresh ones are written to the buffer. So the
+scheduler's budget and `:matches` in `:stats` read as before, backoff
+bans what it banned, and the e-graph after every iteration has the
+same classes and nodes, which a property checks against the unskipped
+run under both schedulers. `:applied` can differ either way (135 791
+and 135 916 on AC-10): it counts merges made while applying, and
+whether an application makes a merge or finds it made depends on what
+was applied before it.
+
+**A class is stamped too**, with its newest node's epoch, so a class
+that has not changed is not asked node by node. Without it search
+paid for the reads: 1 355 to 1 457 ms on Jolt against 1 344 to 1 348
+before, and 571 to 636 on the JVM against 435 to 476; with it, 1 294
+to 1 304 and 519 to 559. Casting the stamps to `long` for the
+comparison was tried and helped on neither: 1 419 and 708.
+
+**Measured**, AC-10, matches found and written for apply:
+
+| iteration | found | written |
+|---|---|---|
+| 6 | 128 790 | 115 236 |
+| 7 | 450 435 | 379 980 |
+| 8 | 868 714 | 559 720 |
+| 9 | 931 610 | 166 412 |
+| 10 | 931 502 | 148 |
+| all ten | 3 336 820 | 1 244 476 |
+
+Iterations 9 and 10 are to the match what the lookups in the previous
+graph counted on 09-25, so the stamps lose nothing to being per node.
+Medians of three, before and after on the same day, search, apply and
+rebuild in brackets:
+
+| fixture | JVM before | JVM after | Jolt 0.8.17 before | Jolt 0.8.17 after |
+|---|---|---|---|---|
+| add-terms, 20 000 | 133 ms | 123 ms | 281 ms | 287 ms |
+| egg rules, 2 iterations | 369 ms (77, 159, 127) | 383 ms (76, 160, 141) | 685 ms (142, 305, 230) | 675 ms (134, 318, 214) |
+| ac-sum 8 | 140 ms (27, 97, 14) | 109 ms (24, 69, 13) | 303 ms (70, 205, 25) | 226 ms (65, 135, 24) |
+| ac-sum 10 | 2 834 ms (476, 2 005, 326) | 2 057 ms (519, 1 206, 306) | 6 175 ms (1 348, 4 122, 667) | 4 514 ms (1 304, 2 532, 637) |
+
+Apply fell by 0.8 s on the JVM and 1.6 s on Jolt, where the per-hit
+costs of 09-25 projected 0.9 and 1.5. Iterations 9 and 10, which
+change nothing, take 347 ms together on the JVM and 727 on Jolt where
+they took 1 017 and 1 997. A run of two iterations has little to
+skip and pays for the stamps, within noise on both runtimes. Against
+lambda-microegg's 1.5 s the JVM is at 1.4 times and Jolt at 3.0.
+
+What is left of the idea: the search still walks every match to find
+the fresh ones, 931 502 of them in iteration 10 to write 148. Seeding
+the search from the nodes stamped since and walking outward, up
+through `:parents` as well as down (semi-naive, section 6), would not
+walk the rest.
+
 ### What persistence still buys, unchanged
 
 - **Timelines.** `(saturate eg rules {:timeline? true})` retains the
@@ -1019,9 +1106,14 @@ default). A scheduler is a map `{:init :search :can-stop :report}`,
 so the AC experiments can bring their own. Backoff is not our answer
 to AC; it is the baseline the AC experiments (../design/ac-problem.md)
 are measured against. A pattern rule's matches travel between the
-phases as a flat buffer, `{:buf long-array :n count}`, never as maps;
-a searcher's are a vector of maps; `match-count` counts either, and
-`[]` from a scheduler means none. A guard or a computed right-hand
+phases as a flat buffer, `{:buf long-array :n count :found count}`,
+never as maps; a searcher's are a vector of maps; `match-count` counts
+either, and `[]` from a scheduler means none. Of the `:found` matches
+of a pattern rule that repeats itself (a pattern on both sides, no
+guard), the buffer holds the `:n` that are fresh since the rule last
+applied its matches, and the rest are not applied again (section 5,
+2026-10-05); `match-count` is `:found`, so a scheduler sees what it
+saw. A guard or a computed right-hand
 side is handed a bindings map built from the buffer for its match,
 so only rules that have one pay for maps.
 
@@ -1388,6 +1480,25 @@ terms they head under `compare-nodes` and never by ids, and
 the order terms were added in or on which way a union was asked, and
 the table holds every class's term. The two smoke facts that left a
 tied term unasserted now assert it.
+
+Stale matches skipped (2026-10-05, sections 2, 5 and 7; 70 tests, 300
+assertions on both runtimes; bendix's 93 and orrery's 97 unchanged
+and green against it, with orrery's node and browser builds):
+`cromulent.core` keeps `:epoch`, advanced by `next-epoch`, a stamp
+per node in `:stamps` and one per class, written where a node is
+added, moved or re-keyed, and `node-id`; `cromulent.pattern`'s
+matcher tells its callback whether a match is fresh since an epoch,
+and `ematch-flat` takes that epoch, writes the fresh matches and
+counts them all; `cromulent.rewrite` advances the epoch each
+iteration, remembers per rule the epoch it last applied its matches
+at, and searches a rule that repeats itself for what is fresh since;
+`:skip-stale?` turns it off, and an iteration that changes nothing
+returns the e-graph it was given. Tests: nodes and classes are stamped
+when they change; fresh matches by a union, by new nodes and by a
+leaf that moved; a scheduler that notes what comes back to be applied;
+and a property, the run with and without skipping agrees on every
+count after every iteration, on the partition and on every extraction.
+ac-sum 10: JVM 2.8 → 2.1 s, Jolt 6.2 → 4.5 s.
 
 Not yet: explanations, relational e-matching; the AC experiments
 beyond 1–3 live in bendix. CI workflow is written but the repository

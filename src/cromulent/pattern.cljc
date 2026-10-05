@@ -132,37 +132,51 @@
 
 (defn- match-plan
   "Call k once for every way plan matches the class whose root is id,
-  with the registers holding the bindings at that moment. uf is the union-find
-  vector; clean? says stored child ids are roots already."
-  [g uf clean? plan id ^longs regs k]
+  with the registers holding the bindings at that moment. uf is the
+  union-find vector; clean? says stored child ids are roots already.
+
+  k takes one argument, fresh?: whether the match has a node stamped
+  after the epoch `since`, or fresh? was true coming in. stamps is the
+  e-graph's stamp vector. A match that is not fresh was a match of the
+  same class under the same bindings when that epoch ended: none of
+  its nodes has been added, moved or re-keyed since, and two nodes
+  that were not beside each other become so only when one of them
+  moves or the other is re-keyed. A caller that wants every match
+  passes fresh? true, and no stamp is read."
+  [g uf clean? stamps since plan id ^longs regs fresh? k]
   (case (nth plan 0)
     :var
     (let [s (nth plan 1), b (aget regs s)]
       (cond
-        (= b -1) (do (aset regs s (long id)) (k) (aset regs s -1))
-        (= b id) (k)
+        (= b -1) (do (aset regs s (long id)) (k fresh?) (aset regs s -1))
+        (= b id) (k fresh?)
         :else nil))
 
     :leaf
-    (when (= id (eg/lookup g (nth plan 1)))
-      (k))
+    (let [nid (eg/node-id g (nth plan 1))]
+      (when (and (some? nid) (= id (eg/find-in uf nid)))
+        (k (or fresh? (> (nth stamps nid) since)))))
 
     :node
-    (let [op (nth plan 1), n (nth plan 2), plans (nth plan 3)]
-      (reduce-kv (fn [_ _ node]
+    (let [op (nth plan 1), n (nth plan 2), plans (nth plan 3)
+          cls (nth (:classes g) id)
+          ;; a class not stamped since holds no node stamped since
+          look? (and (not fresh?) (> (:stamp cls) since))]
+      (reduce-kv (fn [_ nid node]
                    (when (and (term/compound? node)
                               (= op (term/operator node))
                               (= n (term/arity node)))
-                     (letfn [(go [j]
+                     (letfn [(go [j fresh?]
                                (if (< j n)
                                  (let [c (term/child node j)
                                        c (if clean? c (eg/find-in uf c))]
-                                   (match-plan g uf clean? (nth plans j) c regs #(go (inc j))))
-                                 (k)))]
-                       (go 0)))
+                                   (match-plan g uf clean? stamps since (nth plans j) c regs fresh?
+                                               #(go (inc j) %)))
+                                 (k fresh?)))]
+                       (go 0 (or fresh? (and look? (> (nth stamps nid) since))))))
                    nil)
                  nil
-                 (:nodes (nth (:classes g) id))))))
+                 (:nodes cls)))))
 
 (defn- bindings-of
   "The bindings map for vars from the registers."
@@ -190,8 +204,8 @@
                   out (transient [])]
               (reduce (fn [_ id]
                         (let [r (eg/find-in uf id)]
-                          (match-plan g uf clean? plan r regs
-                                      (fn [] (conj! out {:class r :bindings (bindings-of vars regs)})))
+                          (match-plan g uf clean? nil 0 plan r regs true
+                                      (fn [_] (conj! out {:class r :bindings (bindings-of vars regs)})))
                           nil))
                       nil
                       (get (:by-op g) op))
@@ -212,44 +226,61 @@
   match the class root, then one register per variable of p in
   `:vars` order, so a match's stride is one more than the variable
   count. buf is the array to fill, reused across searches and
-  replaced by one twice as large whenever it fills. Returns
-  [buf' n-matches]; the caller keeps buf' for the next search."
-  [g p ^longs buf]
-  (let [{:keys [plan vars pattern]} (compile p)
-        k (count vars)
-        stride (inc k)
-        cell (atom buf)
-        n (long-array 2 0)                       ; [fill capacity]
-        _ (aset n 1 (long (count buf)))
-        put! (fn [r ^longs regs]
-               (let [i (aget n 0)
-                     ^longs b (if (<= (+ i stride) (aget n 1))
-                                @cell
-                                (let [b (grow @cell)]
-                                  (aset n 1 (* 2 (aget n 1)))
-                                  (reset! cell b)))]
-                 (aset b i (long r))
-                 (loop [j 0]
-                   (when (< j k)
-                     (aset b (+ i 1 j) (aget regs j))
-                     (recur (inc j))))
-                 (aset n 0 (+ i stride))))]
-    (case (nth plan 0)
-      :var (let [regs (long-array 1)]
-             (reduce (fn [_ r] (aset regs 0 (long r)) (put! r regs) nil) nil (eg/roots g)))
-      :leaf (when-let [id (eg/lookup g pattern)]
-              (put! id (long-array 0)))
-      :node (let [op (nth plan 1)
-                  uf (:uf g)
-                  clean? (not (:dirty? g))
-                  regs (long-array k -1)]
-              (reduce (fn [_ id]
-                        (let [r (eg/find-in uf id)]
-                          (match-plan g uf clean? plan r regs (fn [] (put! r regs)))
-                          nil))
-                      nil
-                      (get (:by-op g) op))))
-    [@cell (quot (aget n 0) stride)]))
+  replaced by one twice as large whenever it fills.
+
+  With since, an epoch, only the fresh matches are written: those
+  with a node stamped after it. A match with none was a match of the
+  same class under the same bindings when that epoch ended, so a
+  caller that acted on every match then has nothing to learn from it.
+  Every match is counted either way. A pattern that is one variable
+  or one leaf is not filtered.
+
+  Returns [buf' n-written n-found]; the caller keeps buf' for the
+  next search."
+  ([g p buf] (ematch-flat g p buf nil))
+  ([g p ^longs buf since]
+   (let [{:keys [plan vars pattern]} (compile p)
+         k (count vars)
+         stride (inc k)
+         cell (atom buf)
+         n (long-array 3 0)                      ; [fill capacity found]
+         _ (aset n 1 (long (count buf)))
+         put! (fn [r ^longs regs]
+                (let [i (aget n 0)
+                      ^longs b (if (<= (+ i stride) (aget n 1))
+                                 @cell
+                                 (let [b (grow @cell)]
+                                   (aset n 1 (* 2 (aget n 1)))
+                                   (reset! cell b)))]
+                  (aset b i (long r))
+                  (loop [j 0]
+                    (when (< j k)
+                      (aset b (+ i 1 j) (aget regs j))
+                      (recur (inc j))))
+                  (aset n 0 (+ i stride))))]
+     (case (nth plan 0)
+       :var (let [regs (long-array 1)]
+              (reduce (fn [_ r] (aset regs 0 (long r)) (put! r regs) nil) nil (eg/roots g)))
+       :leaf (when-let [id (eg/lookup g pattern)]
+               (put! id (long-array 0)))
+       :node (let [op (nth plan 1)
+                   uf (:uf g)
+                   clean? (not (:dirty? g))
+                   regs (long-array k -1)
+                   stamps (:stamps g)
+                   all? (nil? since)
+                   since (if all? 0 since)]
+               (reduce (fn [_ id]
+                         (let [r (eg/find-in uf id)]
+                           (match-plan g uf clean? stamps since plan r regs all?
+                                       (fn [fresh?]
+                                         (aset n 2 (inc (aget n 2)))
+                                         (when fresh? (put! r regs))))
+                           nil))
+                       nil
+                       (get (:by-op g) op))))
+     (let [written (quot (aget n 0) stride)]
+       [@cell written (if (= :node (nth plan 0)) (aget n 2) written)]))))
 
 (defn match-class
   "Every bindings map under which pattern p matches the class of id.
@@ -262,8 +293,8 @@
       :leaf (if (= r (eg/lookup g pattern)) [{}] [])
       :node (let [regs (long-array (count vars) -1)
                   out (transient [])]
-              (match-plan g (:uf g) (not (:dirty? g)) plan r regs
-                          (fn [] (conj! out (bindings-of vars regs))))
+              (match-plan g (:uf g) (not (:dirty? g)) nil 0 plan r regs true
+                          (fn [_] (conj! out (bindings-of vars regs))))
               (persistent! out)))))
 
 ;; ---------------------------------------------------------------------------

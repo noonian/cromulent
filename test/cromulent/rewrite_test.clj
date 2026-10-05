@@ -169,6 +169,31 @@
     (is (= egraph (last timeline)))
     (is (nil? (:timeline (rw/embiggen g egg-rules))))))
 
+(deftest a-match-is-applied-once
+  ;; a scheduler that notes, for every search, how many matches there
+  ;; were and how many of them came back to be applied
+  (let [noting {:init (fn [_ _] [])
+                :search (fn [state _ _ search]
+                          (let [ms (search)] [(conj state [(:found ms) (:n ms)]) ms]))
+                :can-stop (fn [state _] [state true])}
+        [g r] (eg/add (eg/egraph) (sum-of 5))
+        run (fn [opts]
+              (loop [run (rw/start g ac-rules (merge {:scheduler noting} opts))]
+                (if (:stop-reason run) run (recur (rw/step run)))))
+        skipping (run {})
+        plain (run {:skip-stale? false})
+        counts (fn [run] (mapv (juxt :nodes :classes :matches) (:stats run)))]
+    (is (= :saturated (:stop-reason skipping) (:stop-reason plain)))
+    (is (= (counts skipping) (counts plain)) "the same e-graph after every iteration, the same matches found")
+    (is (= (ex/extract (:egraph skipping) r) (ex/extract (:egraph plain) r)))
+    (ok? (:egraph skipping))
+    (is (every? (fn [[found n]] (= found n)) (:state plain)) "without skipping every match comes back")
+    (is (every? (fn [[found n]] (= found n)) (take 2 (:state skipping))) "as in a rule's first search")
+    (is (every? (fn [[found n]] (<= n found)) (:state skipping)))
+    (is (< (* 2 (reduce + (map second (:state skipping))))
+           (reduce + (map first (:state skipping))))
+        "over the run, fewer than half the matches found are applied")))
+
 (deftest custom-scheduler
   ;; a scheduler that only ever runs the first rule
   (let [first-only {:init (fn [rules _] (:name (first rules)))
@@ -268,6 +293,36 @@
                       (= (eg/node-count (:egraph a)) (eg/node-count (:egraph b)))
                       (= (eg/class-count (:egraph a)) (eg/class-count (:egraph b)))
                       (= (partition (:egraph a)) (partition (:egraph b)))))))]
+    (is (:pass? res) (pr-str res))))
+
+(def pure-rules
+  "Pattern rules with pattern right-hand sides and no guards, the kind
+  whose stale matches are skipped: egg's README set, commutativity and
+  associativity among them."
+  (into egg-rules
+        [(rw/rule "neg-neg" '[:neg [:neg ?a]] '?a)
+         (rw/rule "assoc-add" '[:+ [:+ ?a ?b] ?c] '[:+ ?a [:+ ?b ?c]])
+         (rw/rule "assoc-mul" '[:* [:* ?a ?b] ?c] '[:* ?a [:* ?b ?c]])
+         (rw/rule "distribute" '[:* ?a [:+ ?b ?c]] '[:+ [:* ?a ?b] [:* ?a ?c]])]))
+
+(deftest skipping-stale-matches-changes-only-the-work
+  ;; with and without it, under either scheduler: the same stop, the
+  ;; same counts of nodes, classes and matches after every iteration,
+  ;; the same partition of the input terms and the same extractions
+  (let [res (tc/quick-check
+             num-tests
+             (prop/for-all [ts cg/terms-gen, scheduler (gen/elements [:simple :backoff])]
+               (let [{:keys [egraph terms]} (cg/add-terms (eg/egraph) ts)
+                     opts {:iter-limit 5 :node-limit 1500 :scheduler scheduler :match-limit 8 :ban-length 2}
+                     a (rw/embiggen egraph pure-rules opts)
+                     b (rw/embiggen egraph pure-rules (assoc opts :skip-stale? false))
+                     shape (fn [res] [(:stop-reason res) (mapv (juxt :nodes :classes :matches) (:stats res))])
+                     partition (fn [g] (set (vals (group-by #(cg/id-of g %) terms))))
+                     best (fn [g] (let [ex (ex/extractor g)] (mapv #(ex (cg/id-of g %)) terms)))]
+                 (and (empty? (check/violations (:egraph a)))
+                      (= (shape a) (shape b))
+                      (= (partition (:egraph a)) (partition (:egraph b)))
+                      (= (best (:egraph a)) (best (:egraph b)))))))]
     (is (:pass? res) (pr-str res))))
 
 (deftest searcher-rules

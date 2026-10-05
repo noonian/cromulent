@@ -39,17 +39,27 @@
                vector of ids whose class's analysis data must be
                recomputed from its nodes (a worklist)
     :dirty?    true once a union has happened since the last rebuild
+    :epoch     a counter the caller advances with `next-epoch` to mark a
+               point in the e-graph's history; the core only reads it
+    :stamps    vector, node id -> the epoch in which the node last
+               changed: was added, was moved into another class by a
+               union, or was re-keyed by `rebuild`. A pattern match all
+               of whose nodes are older than an epoch was a match, of
+               the same class under the same bindings, when that epoch
+               ended (cromulent.pattern, cromulent.rewrite)
     :analyses  a vector of analysis maps (see `egraph`), possibly empty
     :analysis-state
                map, analysis name -> whatever that analysis keeps
                (an index, say); the core never touches it
 
-  A class map is {:id :members :nodes :parents :data}: every id that
-  names the class, as a vector; the e-nodes of the class, a map of
-  node id -> e-node; the ids of the e-nodes that have this class as a
-  child, as a set; and the analysis data, a map from analysis name to
-  that analysis's data for the class. A node that turns out congruent
-  to another is retired: its id stays a member and leaves :nodes.
+  A class map is {:id :members :nodes :parents :data :stamp}: every
+  id that names the class, as a vector; the e-nodes of the class, a
+  map of node id -> e-node; the ids of the e-nodes that have this
+  class as a child, as a set; the analysis data, a map from analysis
+  name to that analysis's data for the class; and the epoch in which a
+  node of the class last changed, so no node of the class is stamped
+  later. A node that turns out congruent to another is retired: its id
+  stays a member and leaves :nodes.
 
   Between `union` and `rebuild` the hashcons keys and the stored nodes
   of the queued parents may be stale; `rebuild` restores every
@@ -94,6 +104,7 @@
    {:next-id 0 :uf [] :memo {} :memo-other {} :ops {} :op-names []
     :classes [] :by-op {}
     :pending [] :analysis-pending [] :dirty? false
+    :epoch 0 :stamps []
     :analyses (vec (concat (when analysis [analysis]) analyses))
     :analysis-state {}}))
 
@@ -300,6 +311,17 @@
   [cls]
   (+ (count (:members cls)) (count (:parents cls))))
 
+(defn- stamp
+  "stamps with the node of id nid marked as changed in epoch."
+  [stamps nid epoch]
+  (if (= epoch (nth stamps nid)) stamps (assoc stamps nid epoch)))
+
+(defn next-epoch
+  "eg with its epoch advanced: every node that changes from here on is
+  stamped later than every node that has changed so far."
+  [eg]
+  (assoc eg :epoch (inc (:epoch eg))))
+
 (defn add-node
   "Add one e-node whose children are class ids. Returns [eg' id], id
   the canonical id of its class. The node is canonicalized first; an
@@ -316,8 +338,10 @@
             eg (-> eg
                    (assoc :next-id (inc id))
                    (update :uf conj id)
+                   (update :stamps conj (:epoch eg))
                    (memo-put node id)
-                   (update :classes conj {:id id :members [id] :nodes {id node} :parents #{} :data data}))
+                   (update :classes conj {:id id :members [id] :nodes {id node} :parents #{} :data data
+                                          :stamp (:epoch eg)}))
             eg (if (term/compound? node)
                  (-> (reduce (fn [eg c] (update-in eg [:classes c :parents] conj id))
                              eg
@@ -328,11 +352,17 @@
         (let [eg (run-modify eg id)]
           [eg (find eg id)])))))
 
+(defn node-id
+  "The id of node (children are class ids), or nil when the e-graph
+  has no such node. Adds nothing."
+  [eg node]
+  (memo-get eg (canonicalize eg node)))
+
 (defn lookup
   "The canonical id of the class holding node (children are class
   ids), or nil when the e-graph has no such node. Adds nothing."
   [eg node]
-  (when-let [id (memo-get eg (canonicalize eg node))]
+  (when-let [id (node-id eg node)]
     (find eg id)))
 
 (defn add
@@ -358,9 +388,10 @@
   The class that is cheaper to move is merged into the other: the one
   with fewer members and parents, the younger root on a tie. Its ids
   are pointed at the surviving root now, which keeps the union-find
-  flat. Deferred: its parents are queued for `rebuild`, which re-keys
-  them in the hashcons and finds the congruences that follow; nothing
-  else is repaired now."
+  flat, and its nodes are stamped with the epoch. Deferred: its
+  parents are queued for `rebuild`, which re-keys them in the hashcons
+  and finds the congruences that follow; nothing else is repaired
+  now."
   [eg a b]
   (let [ra (find eg a), rb (find eg b)]
     (if (= ra rb)
@@ -377,9 +408,13 @@
                              (:by-op eg)
                              (:nodes cb))
             uf (reduce (fn [uf id] (assoc uf id ra)) (:uf eg) (:members cb))
+            ;; the nodes that change class sit beside nodes they did not before
+            epoch (:epoch eg)
+            stamps (reduce-kv (fn [stamps nid _] (stamp stamps nid epoch)) (:stamps eg) (:nodes cb))
             eg (-> eg
                    (assoc :by-op by-op)
                    (assoc :uf uf)
+                   (assoc :stamps stamps)
                    (assoc-in [:classes rb] nil)
                    (assoc :dirty? true)
                    (update :pending push-parents (:parents cb)))
@@ -390,7 +425,8 @@
                                            :members (merge-into (:members ca) (:members cb))
                                            :nodes (merge-into (:nodes ca) (:nodes cb))
                                            :parents (merge-into (:parents ca) (:parents cb))
-                                           :data data})
+                                           :data data
+                                           :stamp epoch})
             eg (if analyses?
                  (-> (cond-> (update eg :analysis-pending conj ra)
                        (not= data (:data ca)) (update :analysis-pending push-parents (:parents ca))
@@ -417,9 +453,9 @@
 (defn- process-pending
   "Drain the congruence worklist. Each queued id names a node one of
   whose children was merged away: the node is re-keyed in the hashcons
-  under its canonical form and rewritten in its class, and when
-  another node already has that form the two are congruent, so the
-  queued one is retired into it. Unions queue more work; the loop ends
+  under its canonical form, rewritten in its class and stamped with
+  the epoch, and when another node already has that form the two are
+  congruent, so the queued one is retired into it. Unions queue more work; the loop ends
   when the worklist is empty, and then every stored node is canonical
   and the hashcons holds exactly the stored nodes. Only the classes of
   queued nodes are written. A canonical lookup can never hit a key
@@ -443,7 +479,11 @@
               (recur (if (nil? other)
                        (-> eg
                            (memo-put node' nid)
-                           (assoc-in [:classes r :nodes nid] node'))
+                           (update-in [:classes r]
+                                      (fn [cls] (assoc cls
+                                                       :nodes (assoc (:nodes cls) nid node')
+                                                       :stamp (:epoch eg))))
+                           (assoc :stamps (stamp (:stamps eg) nid (:epoch eg))))
                        (retire eg nid other))))))))))
 
 (defn- recompute

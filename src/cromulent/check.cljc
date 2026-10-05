@@ -8,7 +8,7 @@
 (defn violations
   "Every broken invariant of g, as maps with a :type."
   [g]
-  (let [{:keys [next-id uf classes by-op pending analysis-pending dirty? analyses ops op-names]} g
+  (let [{:keys [next-id uf classes by-op pending analysis-pending dirty? analyses ops op-names epoch stamps]} g
         memo (vec (eg/memo-entries g))
         memo-map (into {} memo)
         ids (range next-id)
@@ -18,9 +18,18 @@
         ;; node id -> stored node, over every class
         stored (into {} (for [r roots, entry (:nodes (cls r))] entry))]
     (-> []
-        (into (when-not (= next-id (count uf) (count classes))
+        (into (when-not (= next-id (count uf) (count classes) (count stamps))
                 [{:type :table-sizes :next-id next-id
-                  :uf (count uf) :classes (count classes)}]))
+                  :uf (count uf) :classes (count classes) :stamps (count stamps)}]))
+        (into (for [id ids
+                    :let [e (nth stamps id nil)]
+                    :when (not (and (some? e) (<= 0 e epoch)))]
+                {:type :stamp-out-of-range :id id :stamp e :epoch epoch}))
+        (into (for [r roots
+                    :let [e (:stamp (cls r))
+                          newest (reduce max 0 (map #(nth stamps % 0) (keys (:nodes (cls r)))))]
+                    :when (not (and (some? e) (<= newest e epoch)))]
+                {:type :class-stamp :id r :stamp e :newest-node newest :epoch epoch}))
         (into (for [id ids
                     :let [r? (eg/root? g id), c (cls id)]
                     :when (not= r? (some? c))]

@@ -138,6 +138,25 @@
         [g b] (eg/add g :b)]
     (is (= a (second (eg/union g a b)) (second (eg/union g b a))) "on a tie the older root survives")))
 
+(deftest nodes-are-stamped-when-they-change
+  ;; f(x), g(y) and h(y), all added in epoch 0; then, in epoch 1, x = y.
+  ;; The class of x has the fewer parents, so it is the one merged: x
+  ;; moves, f(x) is re-keyed, and no other node changes
+  (let [g (reduce (fn [g t] (first (eg/add g t))) (eg/egraph) [[:f :x] [:g :y] [:h :y]])
+        x (eg/node-id g :x), y (eg/node-id g :y)
+        fx (eg/node-id g [:f x]), gy (eg/node-id g [:g y]), hy (eg/node-id g [:h y])
+        g' (ok? (eg/rebuild (first (eg/union (eg/next-epoch g) x y))))
+        [g' z] (eg/add g' :z)]
+    (is (every? zero? (:stamps g)))
+    (is (= y (eg/find g' x)))
+    (is (= [1 1 0 0 0 1] (mapv #(nth (:stamps g') %) [x fx y gy hy z]))
+        "the moved node, the re-keyed node and the new node are of epoch 1")
+    (is (= [1 1 0 0 1] (mapv #(:stamp (eg/eclass g' %)) [y fx gy hy z]))
+        "and so are their classes: a class is stamped with its newest node")
+    (is (= [:f y] (get (:nodes (eg/eclass g' fx)) fx)) "f(x) reads f(y) now, under the same id")
+    (is (nil? (eg/node-id g :w)))
+    (ok? g')))
+
 (deftest parents-of-a-class
   (let [[g s] (eg/add (eg/egraph) [:+ :x :y])
         [g p] (eg/add g [:* :x :x])

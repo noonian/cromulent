@@ -28,6 +28,12 @@
   pass). `ematch`, `match-class` and `instantiate` accept a pattern or
   its compiled form.
 
+  `ematch-flat` can be asked for only the fresh matches, those with a
+  node stamped after an epoch, and still says how many matches there
+  are. A pattern of one operator over variables and leaves, which most
+  rules are, is matched by one pass over that operator's nodes with no
+  call per child (`match-one-node`).
+
   The compiled form also holds a program for the other direction: a
   post-order list of instructions, `[:leaf value dest]` and
   `[:node op operand-registers dest]`, over one register file holding
@@ -178,6 +184,71 @@
                  nil
                  (:nodes cls)))))
 
+(defn- match-one-node
+  "Every match of a pattern of one operator over variables and leaves,
+  whose plan is `plan`: each node of that operator is looked at once,
+  with no call per child. write is called with the class root for
+  every fresh match, the registers holding its bindings; with all?
+  every match is fresh. Returns how many matches there are. A stale
+  match costs the comparisons that show it is a match and nothing
+  more. The order is `match-plan`'s."
+  [g uf clean? stamps since all? plan ^longs regs write]
+  (let [op (nth plan 1), n (nth plan 2), plans (nth plan 3)
+        classes (:classes g)
+        leaf-at (long-array n -1)                ; the class a leaf child must be, -1 for a variable
+        reg-at (long-array n -1)                 ; a variable child's register
+        again (long-array n 0)                   ; 1 when an earlier child is the same variable
+        ;; nil when a leaf is not in g; else whether a leaf is fresh, and so every match
+        leaves (loop [j 0, fresh? false]
+                 (if (< j n)
+                   (let [p (nth plans j)]
+                     (if (= :var (nth p 0))
+                       (let [s (nth p 1)]
+                         (aset reg-at j (long s))
+                         (loop [i 0]
+                           (when (< i j)
+                             (if (= s (aget reg-at i))
+                               (aset again j 1)
+                               (recur (inc i)))))
+                         (recur (inc j) fresh?))
+                       (when-let [lid (eg/node-id g (nth p 1))]
+                         (aset leaf-at j (long (eg/find-in uf lid)))
+                         (recur (inc j) (or fresh? (> (nth stamps lid) since))))))
+                   fresh?))
+        found (long-array 1 0)]
+    (when (some? leaves)
+      (let [all? (or all? leaves)]
+        (reduce
+         (fn [_ id]
+           (let [r (eg/find-in uf id)
+                 cls (nth classes r)
+                 look? (and (not all?) (> (:stamp cls) since))]
+             (reduce-kv
+              (fn [_ nid node]
+                (when (and (term/compound? node)
+                           (= op (term/operator node))
+                           (= n (term/arity node))
+                           (loop [j 0]
+                             (if (< j n)
+                               (let [c (term/child node j)
+                                     c (if clean? c (eg/find-in uf c))
+                                     l (aget leaf-at j)]
+                                 (cond
+                                   (>= l 0) (when (= c l) (recur (inc j)))
+                                   (zero? (aget again j)) (do (aset regs (aget reg-at j) (long c))
+                                                              (recur (inc j)))
+                                   :else (when (= c (aget regs (aget reg-at j))) (recur (inc j)))))
+                               true)))
+                  (aset found 0 (inc (aget found 0)))
+                  (when (or all? (and look? (> (nth stamps nid) since)))
+                    (write r regs)))
+                nil)
+              nil
+              (:nodes cls))))
+         nil
+         (get (:by-op g) op))))
+    (aget found 0)))
+
 (defn- bindings-of
   "The bindings map for vars from the registers."
   [vars ^longs regs]
@@ -214,7 +285,7 @@
 (defn- grow
   "buf copied into a long-array twice its size."
   [^longs buf]
-  (let [n (count buf), out (long-array (* 2 n))]
+  (let [n (count buf), out (long-array (max 1 (* 2 n)))]
     (loop [i 0]
       (when (< i n)
         (aset out i (aget buf i))
@@ -235,6 +306,12 @@
   Every match is counted either way. A pattern that is one variable
   or one leaf is not filtered.
 
+  A pattern of one operator is matched by one pass over that
+  operator's nodes (`match-one-node`); a deeper one by the walk of
+  `match-plan`, every match counted and the fresh ones written. What
+  is written, and in what order, is the same either way, and is the
+  order of `ematch`.
+
   Returns [buf' n-written n-found]; the caller keeps buf' for the
   next search."
   ([g p buf] (ematch-flat g p buf nil))
@@ -249,9 +326,11 @@
                 (let [i (aget n 0)
                       ^longs b (if (<= (+ i stride) (aget n 1))
                                  @cell
-                                 (let [b (grow @cell)]
-                                   (aset n 1 (* 2 (aget n 1)))
-                                   (reset! cell b)))]
+                                 (loop [b (grow @cell)]
+                                   (if (<= (+ i stride) (count b))
+                                     (do (aset n 1 (long (count b)))
+                                         (reset! cell b))
+                                     (recur (grow b)))))]
                   (aset b i (long r))
                   (loop [j 0]
                     (when (< j k)
@@ -270,15 +349,17 @@
                    stamps (:stamps g)
                    all? (nil? since)
                    since (if all? 0 since)]
-               (reduce (fn [_ id]
-                         (let [r (eg/find-in uf id)]
-                           (match-plan g uf clean? stamps since plan r regs all?
-                                       (fn [fresh?]
-                                         (aset n 2 (inc (aget n 2)))
-                                         (when fresh? (put! r regs))))
-                           nil))
-                       nil
-                       (get (:by-op g) op))))
+               (if (not-any? #(= :node (nth % 0)) (nth plan 3))
+                 (aset n 2 (long (match-one-node g uf clean? stamps since all? plan regs put!)))
+                 (reduce (fn [_ id]
+                           (let [r (eg/find-in uf id)]
+                             (match-plan g uf clean? stamps since plan r regs all?
+                                         (fn [fresh?]
+                                           (aset n 2 (inc (aget n 2)))
+                                           (when fresh? (put! r regs))))
+                             nil))
+                         nil
+                         (get (:by-op g) op)))))
      (let [written (quot (aget n 0) stride)]
        [@cell written (if (= :node (nth plan 0)) (aget n 2) written)]))))
 

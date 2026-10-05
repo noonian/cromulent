@@ -978,6 +978,121 @@ the search from the nodes stamped since and walking outward, up
 through `:parents` as well as down (semi-naive, section 6), would not
 walk the rest.
 
+### Measured: stale matches counted, not walked; set aside (2026-10-05)
+
+The entry above left the search walking every match to find the fresh
+ones. Two things were built against that. One stays: a pattern of one
+operator is matched in a single pass. The other, counting the stale
+matches of a deeper pattern instead of walking them, was built,
+measured and set aside; its numbers are here so it can be picked up
+by its row.
+
+**The decision first.** `:matches` and the scheduler's budget stay the
+count of every match. Counting only the fresh ones would have been
+less to build, and it is arguably what a scheduler should ration,
+since a stale match now costs a rule nothing. But the number of fresh
+matches is not a property of the e-graph: it is an upper bound on the
+new matches whose value depends on which class a union moved, so
+under backoff the result of a bounded run would follow the filter's
+precision, and `:skip-stale?` would change results where it now
+changes only work. Nothing outside the runner could check it either,
+where the count of all matches is `(count (ematch g p))`. The buffer
+carries both numbers (`:n` and `:found`), so a scheduler that budgets
+on fresh matches is a scheduler one can write, and choose.
+
+**One operator, one pass** (`match-one-node`, kept). A pattern of one
+operator over variables and leaves, which most rules are
+(`[:+ ?a ?b]`, `[:* ?a 0]`, `[:+ ?x ?x]`), is matched by one pass
+over that operator's nodes with no call per child: leaves are
+resolved once per search, to the class each must be and to whether
+one of them is fresh, a repeated variable compares two registers, and
+a stale match costs the comparisons that show it is a match. It
+serves every search, the first included, so it pays in every
+iteration. The egg rules are all of this shape; their search, medians
+of eleven over three iterations: 26, 43 and 38 ms before on the JVM
+and 19, 32 and 27 after; 67, 68 and 63 on Jolt and 48, 47 and 43.
+Medians of three, search, apply and rebuild in brackets:
+
+| fixture | JVM before | JVM after | Jolt 0.8.17 before | Jolt 0.8.17 after |
+|---|---|---|---|---|
+| egg rules, 2 iterations | 396 ms (82, 159, 149) | 376 ms (64, 158, 148) | 672 ms (135, 316, 212) | 632 ms (96, 305, 223) |
+
+AC-10 is unmoved by it alone (search 553 ms on the JVM and 1 299 on
+Jolt, as before): its commutativity rule is a small share of the
+walk, and associativity is deeper.
+
+**Counting instead of walking** (built, measured, set aside). For a
+deeper pattern with no repeated variable, on a clean graph, with an
+epoch: the matches of each node plan at each class were counted from
+the children's counts, the product over a node's children of their
+counts summed over the class's nodes of that operator, memoized per
+plan and class in a `long-array` beside a flag saying whether any of
+them is fresh; the product is why the pattern had to be linear. The
+walk then kept `match-plan`'s order with one more argument, whether
+what comes after this plan can still make the match fresh: when it
+cannot, a class with no fresh match is passed over, a class with some
+is walked through the nodes that lead to one, found once per plan
+and class and kept for the search, and under a stale node the last
+child with a fresh match must supply one unless an earlier child did.
+Each fresh match was reached once and the root's count was `:found`.
+The matches written, their order and so every run were unchanged. A
+pattern with a repeated variable below one operator kept the full
+walk. Search per iteration of AC-10, medians of five:
+
+| iteration | found | written | JVM before | JVM with | Jolt 0.8.17 before | Jolt 0.8.17 with |
+|---|---|---|---|---|---|---|
+| 6 | 128 790 | 115 236 | 24 ms | 27 ms | 61 ms | 69 ms |
+| 7 | 450 435 | 379 980 | 85 ms | 82 ms | 218 ms | 233 ms |
+| 8 | 868 714 | 559 720 | 140 ms | 110 ms | 382 ms | 341 ms |
+| 9 | 931 610 | 166 412 | 137 ms | 59 ms | 327 ms | 129 ms |
+| 10 | 931 502 | 148 | 107 ms | 20 ms | 289 ms | 37 ms |
+| all ten | 3 336 820 | 1 244 476 | 504 ms | 300 ms | 1 297 ms | 831 ms |
+
+ac-sum 10 as the median of five runs: 2 096 to 1 903 ms on the JVM
+(search 553 to 285) and 4 503 to 4 008 on Jolt (1 317 to 823); its
+iterations 9 and 10 together 142 ms and 281 where they took 341 and
+766; 1.3 times lambda-microegg's 1.5 s on the JVM and 2.7 on Jolt,
+against 1.4 and 3.0 without. ac-sum 8's search went from 30 to 23 ms
+and 65 to 50. Along the way: sending one-operator patterns through
+the count and the walk cost them three passes where one does (the
+egg rules' search 78 to 86 ms on the JVM, 140 to 168 on Jolt), which
+is where `match-one-node` came from; without the kept nodes a class
+with one fresh node was scanned once per parent that reached it
+(iteration 9: 87 ms and 194 against 61 and 146); a second count, of
+the stale matches, was replaced by the flag, one multiplication fewer
+and exact at any size. The projection had been search in proportion
+to the matches written plus the count: 295 ms on the JVM, where it
+measured 285 to 306, and 660 on Jolt, where it measured 823 to 831,
+because the iterations whose matches are mostly fresh gain nothing
+and pay for the count. Counting alone, in a prototype that kept two
+counts, took 105 ms of the run on the JVM and 177 on Jolt.
+
+**Why it is set aside.** About 190 lines, three ways to search where
+there was one, and every later change to the matcher (the matched
+node's id in the buffer for explanations, AC patterns, relational
+e-matching) made three times over. The payoff is narrow: it is what
+makes search scale with nodes rather than matches, which matters when
+matches dwarf nodes, the AC blowup and little else, and neither
+orrery's lessons nor bendix's runs are there. It does not reach the
+persistence goal either: with exact counts a quiet iteration still
+costs a pass over the operator's nodes per rule (20 ms on the JVM and
+37 on Jolt at 57 012 nodes), deep path or not, where a search seeded
+from the fresh nodes and walking up through `:parents` would cost
+what changed, and could not say how many matches there are. The
+tests written for it stay, as a property over two scripts with an
+epoch between them: the matches `ematch-flat` writes are those with a
+node stamped since, found from the bindings by lookup, in `ematch`'s
+order, and its count is `ematch`'s, for one-operator and deeper
+patterns with and without a repeated variable.
+
+**Found by the tests**: `ematch-flat` grew its buffer once per match,
+so a buffer shorter than half a match overflowed. It grows until the
+match fits.
+
+What is left: a backoff that budgets on fresh matches, as a scheduler
+of its own; the counting walk, by its rows above, should a workload
+run deep rules on a large settled graph.
+
 ### What persistence still buys, unchanged
 
 - **Timelines.** `(saturate eg rules {:timeline? true})` retains the
@@ -1043,6 +1158,13 @@ pattern is **compiled once** into a plan and matched by index loops:
   flat `long-array`, stride one plus the variable count, grown by
   doubling and reused across a run, which is what the runner reads
   for pattern rules (section 5, second pass).
+- `ematch-flat` takes an epoch and then writes only the fresh
+  matches, those with a node stamped after it, while still counting
+  them all. A pattern of one operator over variables and leaves is
+  matched by one pass over that operator's nodes with no call per
+  child (`match-one-node`; section 5, 2026-10-05, "set aside"), a
+  deeper one by the walk above; both write the same matches in the
+  order `ematch` returns them.
 - The compiled form also holds a program for instantiation: a
   post-order list of `[:leaf value dest]` and
   `[:node op operand-registers dest]` over one register file,
@@ -1501,6 +1623,23 @@ leaf that moved; a scheduler that notes what comes back to be applied;
 and a property, the run with and without skipping agrees on every
 count after every iteration, on the partition and on every extraction.
 ac-sum 10: JVM 2.8 → 2.1 s, Jolt 6.2 → 4.5 s.
+
+One operator, one pass (2026-10-05, sections 5 and 6; 73 tests, 308
+assertions on both runtimes; bendix's 93 and orrery's 97 unchanged
+and green against it, with orrery's node and browser builds):
+`cromulent.pattern` only. `ematch-flat` matches a pattern of one
+operator over variables and leaves in one pass over that operator's
+nodes (`match-one-node`); a deeper pattern is walked as before. The
+matches written, their order, the counts and so every run are what
+they were. Counting the stale matches of deeper patterns instead of
+walking them was built, measured and set aside (section 5). Tests: a
+property over two scripts with an epoch between them, the matches
+written are those with a node stamped since, found from the bindings
+by lookup, in `ematch`'s order, and the count is `ematch`'s, for
+one-operator and deeper patterns with and without a repeated
+variable; freshness from either child; a buffer smaller than one
+match, which overflowed before. egg rules search: 82 → 64 ms on the
+JVM, 135 → 96 on Jolt.
 
 Not yet: explanations, relational e-matching; the AC experiments
 beyond 1–3 live in bendix. CI workflow is written but the repository

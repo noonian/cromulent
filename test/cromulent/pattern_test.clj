@@ -69,13 +69,19 @@
     (is (= #{r} (get (:by-op g) :*)))
     (is (empty? (check/violations (eg/rebuild g))))))
 
-(defn- flat
+(defn- flat-seq
   "[matches found] of p in g as `ematch-flat` gives them: the matches
-  it wrote, each [class binding ...], as a set, and how many it found."
+  it wrote, each [class binding ...], in the order it wrote them, and
+  how many it found."
   [g p since]
   (let [[^longs buf n found] (pat/ematch-flat g p (long-array 4) since)
         stride (inc (count (:vars (pat/compile p))))]
-    [(set (for [m (range n)] (mapv #(aget buf (+ (* m stride) %)) (range stride)))) found]))
+    [(vec (for [m (range n)] (mapv #(aget buf (+ (* m stride) %)) (range stride)))) found]))
+
+(defn- flat
+  "`flat-seq` with the matches as a set."
+  [g p since]
+  (update (flat-seq g p since) 0 set))
 
 (deftest fresh-matches
   ;; f(g(x)) and f(g(y)), and a g(z) and an f(w) that do not meet, all
@@ -95,6 +101,33 @@
       (is (= [#{[(eg/find g1 fw) z] [fgv v]} 4] (flat g1 p 0))
           "the match a union made and the match of new nodes; the two old ones are counted and not written")
       (is (= [#{} 4] (flat g1 p 1)) "and after epoch 1, none"))))
+
+(deftest freshness-comes-from-any-child
+  ;; f(g(x), h(y)) of epoch 0. In epoch 1 a new g(x2) joins the class
+  ;; of g(x) and a new h(y2) that of h(y); the new nodes are the ones
+  ;; that move, so f, g(x) and h(y) keep their stamps. Of the four
+  ;; matches now, only the old one has no fresh node.
+  (let [p '[:f [:g ?a] [:h ?b]]
+        [g fgh] (eg/add (eg/egraph) [:f [:g :x] [:h :y]])
+        {x :x, y :y, gx [:g :x], hy [:h :y]} (ids g :x :y [:g :x] [:h :y])
+        [g1 gx2] (eg/add (eg/next-epoch g) [:g :x2])
+        [g1 hy2] (eg/add g1 [:h :y2])
+        g1 (eg/rebuild (first (eg/union (first (eg/union g1 gx gx2)) hy hy2)))
+        {x2 :x2, y2 :y2} (ids g1 :x2 :y2)
+        f (eg/find g1 fgh)]
+    (is (empty? (check/violations g1)))
+    (is (= [#{[f x y]} 1] (flat g p nil)))
+    (is (= [#{[f x2 y] [f x y2] [f x2 y2]} 4] (flat g1 p 0)))
+    (is (= [#{} 4] (flat g1 p 1)))
+    (is (= 4 (count (first (flat g1 p nil)))))))
+
+(deftest the-buffer-grows-to-fit
+  ;; one match is wider than the buffer handed in, even doubled
+  (let [p '[:f ?a ?b ?c ?d ?e ?f ?g ?h]
+        [g f] (eg/add (eg/egraph) [:f 1 2 3 4 5 6 7 8])
+        [buf n found] (pat/ematch-flat g p (long-array 4))]
+    (is (= [1 1] [n found]))
+    (is (= (into [f] (map #(cg/id-of g %)) (range 1 9)) (vec (take 9 buf))))))
 
 (deftest a-leaf-that-moved-makes-a-match-fresh
   (let [p '[:f 0]
@@ -171,6 +204,80 @@
                                                :bindings (into {} (map (fn [[v s]] [v (cg/id-of egraph s)])) b)})
                              true))
                          terms))))]
+    (is (:pass? res) (pr-str res))))
+
+(defn- fresh-match?
+  "Has the match of pattern p under bindings a node stamped after
+  since? The reference for `ematch-flat`: the match's nodes are found
+  from the bindings by lookup, from the leaves of the pattern up."
+  [g p bindings since]
+  (letfn [(fresh? [nid] (> (nth (:stamps g) nid) since))
+          (walk [p]                                ; [class fresh?]
+            (cond
+              (pat/variable? p)
+              [(get bindings p) false]
+
+              (term/compound? p)
+              (let [cs (mapv walk (term/children p))
+                    nid (eg/node-id g (term/make (term/operator p) (mapv first cs)))]
+                [(eg/find g nid) (boolean (or (some second cs) (fresh? nid)))])
+
+              :else
+              (let [nid (eg/node-id g p)]
+                [(eg/find g nid) (fresh? nid)])))]
+    (second (walk p))))
+
+(defn- shape
+  "The top `depth` levels of ground term t as a pattern: whatever lies
+  below them and every keyword leaf a variable, the numbers kept. With
+  share?, equal subterms get the same variable, so a variable may well
+  repeat; without, every variable is new."
+  [t depth share?]
+  (let [names (atom {}), n (atom 0)
+        variable (fn [t]
+                   (or (when share? (get @names t))
+                       (let [v (symbol (str "?k" (swap! n inc)))]
+                         (swap! names assoc t v)
+                         v)))]
+    (letfn [(go [t d]
+              (cond
+                (and (term/compound? t) (pos? d))
+                (term/make (term/operator t) (mapv #(go % (dec d)) (term/children t)))
+
+                (number? t) t
+                :else (variable t)))]
+      (go t depth))))
+
+(deftest only-the-fresh-matches-are-written
+  ;; a script, then an epoch, then another script. A search since that
+  ;; epoch writes exactly the matches that have a node stamped after
+  ;; it, in the order `ematch` finds them, and counts them all. The
+  ;; patterns each time: a random one, and the shape of one of the
+  ;; larger terms of the scripts to four depths, which is sure to
+  ;; match, and at the shallower depths in many ways, each both with
+  ;; a variable of its own for every subterm and with equal subterms
+  ;; sharing one. So both ways of searching are tried, one operator
+  ;; and deeper, with and without a repeated variable.
+  (let [res (tc/quick-check
+             num-tests
+             (prop/for-all [before cg/script-gen, after cg/script-gen, p cg/pattern-gen, i gen/nat]
+               (let [{g0 :egraph, ts0 :terms} (cg/run-script (eg/egraph) before)
+                     since (:epoch g0)
+                     {g :egraph, ts :terms} (cg/run-script (eg/next-epoch g0) after)
+                     larger (->> (into ts0 ts) (filter term/compound?) (sort-by (juxt (comp - cg/size) pr-str)))
+                     t (when (seq larger) (nth larger (mod i (inc (quot (count larger) 3)))))]
+                 (every? (fn [p]
+                           (or (not (term/compound? p))
+                               (let [vars (:vars (pat/compile p))
+                                     all (pat/ematch g p)
+                                     row (fn [{:keys [class bindings]}] (into [class] (map bindings) vars))]
+                                 (and (= [(mapv row all) (count all)] (flat-seq g p nil))
+                                      (= [(into [] (comp (filter #(fresh-match? g p (:bindings %) since)) (map row)) all)
+                                          (count all)]
+                                         (flat-seq g p since))
+                                      (= [[] (count all)] (flat-seq g p (:epoch g)))))))
+                         (cond-> [p]
+                           t (into (for [depth [1 2 3 9], share? [false true]] (shape t depth share?))))))))]
     (is (:pass? res) (pr-str res))))
 
 (deftest ematch-has-no-duplicates

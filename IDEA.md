@@ -1259,6 +1259,8 @@ Constant folding is the degenerate case.
 
 - **Explanations**: egg's proof production. A persistent union history
   makes this easier than in egg; a CAS wants it for "show your work".
+  A proposal, with a proof checker, is in
+  [ideas/explanations.md](ideas/explanations.md).
 - **Relational e-matching**, **packed e-node keys**, **per-operator
   indexes**, **egglog-style Datalog rules**: all after v1, all
   API-neutral, all adopted by benchmark.

@@ -55,6 +55,18 @@
     {:fixture "union+rebuild" :n u :ms (+ ms-u ms-r) :union-ms ms-u :rebuild-ms ms-r
      :nodes (eg/node-count g) :classes (eg/class-count g)}))
 
+(defn union-rebuild-each
+  "u random unions on g with a rebuild after each one: what a caller
+  pays who keeps the e-graph rebuilt between small changes. A rebuild
+  costs what its union touched, so this row must not grow with g."
+  [g u]
+  (let [next! (lcg 11)
+        n (:next-id g)
+        pairs (vec (repeatedly u (fn [] [(mod (next!) n) (mod (next!) n)])))
+        [ms g] (timed #(reduce (fn [g [a b]] (eg/rebuild (first (eg/union g a b)))) g pairs))]
+    {:fixture "union, rebuild each" :n u :ms ms
+     :nodes (eg/node-count g) :classes (eg/class-count g)}))
+
 (defn chain
   "A left-nested sum of n atoms; union every atom with the first, so
   the whole chain collapses through congruence in one rebuild."
@@ -126,6 +138,7 @@
     (row (ematch g "[:+ ?a [:* ?b ?c]]" '[:+ ?a [:* ?b ?c]]))
     (row (ematch g "[:+ ?x ?x]" '[:+ ?x ?x]))
     (row (union-rebuild g 2000))
+    (row (union-rebuild-each g 2000))
     (row (extract g))
     (row (embiggen g "egg rules, 2 iters" egg-rules {:scheduler :simple :iter-limit 2 :node-limit 1000000})))
   (row (chain 2000))

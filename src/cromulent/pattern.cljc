@@ -144,25 +144,25 @@
         :else nil))
 
     :leaf
-    (when (contains? (:nodes (nth (:classes g) id)) (nth plan 1))
+    (when (= id (eg/lookup g (nth plan 1)))
       (k))
 
     :node
     (let [op (nth plan 1), n (nth plan 2), plans (nth plan 3)]
-      (reduce (fn [_ node]
-                (when (and (term/compound? node)
-                           (= op (term/operator node))
-                           (= n (term/arity node)))
-                  (letfn [(go [j]
-                            (if (< j n)
-                              (let [c (term/child node j)
-                                    c (if clean? c (eg/find-in uf c))]
-                                (match-plan g uf clean? (nth plans j) c regs #(go (inc j))))
-                              (k)))]
-                    (go 0)))
-                nil)
-              nil
-              (:nodes (nth (:classes g) id))))))
+      (reduce-kv (fn [_ _ node]
+                   (when (and (term/compound? node)
+                              (= op (term/operator node))
+                              (= n (term/arity node)))
+                     (letfn [(go [j]
+                               (if (< j n)
+                                 (let [c (term/child node j)
+                                       c (if clean? c (eg/find-in uf c))]
+                                   (match-plan g uf clean? (nth plans j) c regs #(go (inc j))))
+                                 (k)))]
+                       (go 0)))
+                   nil)
+                 nil
+                 (:nodes (nth (:classes g) id))))))
 
 (defn- bindings-of
   "The bindings map for vars from the registers."
@@ -259,7 +259,7 @@
         r (eg/find g id)]
     (case (nth plan 0)
       :var [{pattern r}]
-      :leaf (if (contains? (:nodes (eg/eclass g r)) pattern) [{}] [])
+      :leaf (if (= r (eg/lookup g pattern)) [{}] [])
       :node (let [regs (long-array (count vars) -1)
                   out (transient [])]
               (match-plan g (:uf g) (not (:dirty? g)) plan r regs

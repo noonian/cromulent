@@ -49,16 +49,16 @@
                (reduce (fn [[best changed?] i]
                          (if-let [cls (nth classes i)]
                            (let [cur (nth best i)
-                                 b (reduce (fn [b node]
-                                             (let [c (node-cost g best cost-fn node)]
-                                               (if (and c (or (nil? b)
-                                                              (neg? (compare (:cost c) (:cost b)))
-                                                              (and (zero? (compare (:cost c) (:cost b)))
-                                                                   (neg? (term/compare-nodes node (:node b))))))
-                                                 c
-                                                 b)))
-                                           cur
-                                           (:nodes cls))]
+                                 b (reduce-kv (fn [b _ node]
+                                                (let [c (node-cost g best cost-fn node)]
+                                                  (if (and c (or (nil? b)
+                                                                 (neg? (compare (:cost c) (:cost b)))
+                                                                 (and (zero? (compare (:cost c) (:cost b)))
+                                                                      (neg? (term/compare-nodes node (:node b))))))
+                                                    c
+                                                    b)))
+                                              cur
+                                              (:nodes cls))]
                              (if (identical? b cur)
                                [best changed?]
                                [(assoc best i b) true]))

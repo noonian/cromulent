@@ -14,7 +14,7 @@
 (defn- constant-in
   "The numeric leaf in the class of id, if any."
   [g id]
-  (some #(when (number? %) %) (:nodes (eg/eclass g id))))
+  (some #(when (number? %) %) (eg/nodes g id)))
 
 (def egg-rules
   "The rule set of egg's README."

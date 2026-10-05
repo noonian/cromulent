@@ -99,6 +99,57 @@
     (is (= 4 (eg/class-count g2)))
     (is (= g1 (first (eg/add g0 [:+ :x :y]))) "same operations, same value")))
 
+(deftest rebuild-shares-what-it-does-not-touch
+  ;; a hundred unrelated terms f(k); then 0 = 1 makes f(0) and f(1)
+  ;; congruent. The union and the rebuild write those four classes and
+  ;; no other.
+  (let [g (reduce (fn [g k] (first (eg/add g [:f k]))) (eg/egraph) (range 100))
+        zero (eg/lookup g 0), one (eg/lookup g 1)
+        f0 (eg/lookup g [:f zero]), f1 (eg/lookup g [:f one])
+        g' (ok? (eg/rebuild (first (eg/union g zero one))))
+        others (remove #{zero one f0 f1} (eg/roots g))]
+    (is (= (eg/find g' f0) (eg/find g' f1)) "congruence")
+    (is (= 196 (count others)))
+    (is (every? #(identical? (eg/eclass g %) (eg/eclass g' %)) others)
+        "every other class is the very same object in both e-graphs")
+    (is (= 200 (eg/class-count g)) "the old value is intact")
+    (ok? g)))
+
+(deftest find-is-one-read-at-all-times
+  ;; sixteen leaves merged pairwise, then the pairs, and so on, with no
+  ;; rebuild in between
+  (let [[g ids] (reduce (fn [[g ids] k] (let [[g id] (eg/add g k)] [g (conj ids id)]))
+                        [(eg/egraph) []]
+                        (range 16))
+        pairs (mapcat #(partition 2 (take-nth % ids)) [1 2 4 8])
+        g (reduce (fn [g [a b]] (first (eg/union g a b))) g pairs)]
+    (is (= 1 (count (distinct (map #(eg/find g %) ids)))))
+    (is (every? #(eg/root? g (nth (:uf g) %)) ids) "every id points straight at its root")))
+
+(deftest union-moves-the-cheaper-class
+  ;; :x has two parents and a fresh leaf none: whichever way the union
+  ;; is asked, the class of :x survives and no parent needs re-keying
+  (let [[g _] (eg/add (eg/egraph) [:+ [:f :x] [:g :x]])
+        x (eg/lookup g :x)
+        [g z] (eg/add g :z)]
+    (is (= x (second (eg/union g x z)) (second (eg/union g z x))))
+    (is (empty? (:pending (first (eg/union g z x)))) "nothing is queued for rebuild"))
+  (let [[g a] (eg/add (eg/egraph) :a)
+        [g b] (eg/add g :b)]
+    (is (= a (second (eg/union g a b)) (second (eg/union g b a))) "on a tie the older root survives")))
+
+(deftest parents-of-a-class
+  (let [[g s] (eg/add (eg/egraph) [:+ :x :y])
+        [g p] (eg/add g [:* :x :x])
+        x (eg/lookup g :x), y (eg/lookup g :y)]
+    (is (= #{[[:+ x y] s] [[:* x x] p]} (set (eg/parents g x))))
+    (is (= [[[:+ x y] s]] (eg/parents g y)))
+    (is (= [] (eg/parents g s)))
+    (let [[g r] (eg/union g x y)
+          g (eg/rebuild g)]
+      (is (= #{[[:+ r r] (eg/find g s)] [[:* r r] (eg/find g p)]} (set (eg/parents g y)))
+          "canonical nodes and root ids after a union"))))
+
 ;; ---------------------------------------------------------------------------
 ;; a constant-folding analysis, the canonical e-class analysis
 ;;

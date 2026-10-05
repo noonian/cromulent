@@ -107,31 +107,42 @@ tag-agnostic: the CAS decides the vocabulary.
 a union-find root. This is the *logical* e-node; the hashcons may key
 on a packed form (section 5).
 
-**E-class ids** are dense non-negative integers allocated
-sequentially, which is why every id-indexed table below is a vector,
-not a map.
+**Ids** are dense non-negative integers allocated sequentially, which
+is why every id-indexed table below is a vector, not a map. `add-node`
+allocates one per new e-node, and the id does two jobs (2026-10-05,
+section 5). It names that **node** for good: the node's key in its
+class, in its children's parents and in the hashcons, whatever its
+canonical form becomes as classes merge. And through the union-find
+it names the **class** the node is in. A node found congruent to
+another is *retired*: its id stays a member of the class and stops
+naming a node.
 
-**The persistent e-graph** is a map (or record; measure on Jolt):
+**The persistent e-graph** is a map (measured on Jolt, section 5):
 
 ```clojure
 {:next-id  0
- :uf       []      ;; vector, id -> parent id; a root points to itself
- :size     []      ;; vector, root id -> class size (union by size)
- :memo     {}      ;; packed key -> class id: the hashcons for compound nodes of
-                   ;; arity ≤ 2, keyed by op-index·2^48 + a·2^24 + b (section 5)
- :memo-other {}    ;; canonical e-node -> class id for leaves and arity ≥ 3
+ :uf       []      ;; vector, id -> root id, always direct; a root points to itself
+ :memo     {}      ;; packed key -> node id: the hashcons for compound nodes of
+                   ;; arity ≤ 2, keyed by op-index·2^42 + a·2^21 + b (section 5)
+ :memo-other {}    ;; canonical e-node -> node id for leaves and arity ≥ 3
  :ops      {}      ;; operator -> index; :op-names is the inverse vector
  :classes  []      ;; vector, root id -> {:id id
-                   ;;                     :nodes   #{e-node ...}
-                   ;;                     :parents {e-node id ...}   ; parent e-node -> its class
-                   ;;                     :data    any}             ; analysis data
+                   ;;                     :members [id ...]         ; every id that names the class
+                   ;;                     :nodes   {id e-node ...}  ; its e-nodes, by node id
+                   ;;                     :parents #{id ...}        ; nodes with this class as a child
+                   ;;                     :data    {name data}}     ; analysis data
                    ;;          nil for non-roots
  :by-op    {}      ;; operator -> #{root ids} whose class holds a node with that operator
- :pending  []      ;; [parent-node class-id] entries to re-key in :memo (the rebuild worklist)
- :analysis-pending []  ;; [parent-node class-id] entries whose class data must be re-made
+ :pending  []      ;; ids of nodes to re-key in :memo and rewrite in their class (the rebuild worklist)
+ :analysis-pending []  ;; ids whose class data must be re-made
  :dirty?   false   ;; a union has happened since the last rebuild
- :analysis nil}    ;; an Analysis value, or nil
+ :analyses []      ;; analysis maps (section 9)
+ :analysis-state {}}   ;; analysis name -> whatever that analysis keeps
 ```
+
+The functions of `cromulent.core` are the API; this shape is the
+implementation's and changes when a measurement says so. A reader
+that wants a class's nodes or parents asks `nodes` and `parents`.
 
 A tiny `TermLike` protocol (`operator`, `children`, `make-node`,
 `leaf?`) is extended to vectors by default, so the CAS or the
@@ -145,13 +156,15 @@ After `rebuild` (and after any scope exit), all of these hold; a
 `check-invariants` function asserts them in tests after every
 operation:
 
-1. Every non-nil entry of `:classes` is at a union-find root.
-2. Every key of `:memo` is canonical, and maps to a root.
-3. For every class `c` and every node `n` in `(:nodes c)`,
-   `(canonicalize n)` is in `:memo` and maps to `c`. (Congruence
-   closure.)
-4. For every class `c` and every `[p pid]` in `(:parents c)`, `p`
-   mentions `c` as a child and `(find pid)` is the class containing `p`.
+1. Every non-nil entry of `:classes` is at a union-find root, and its
+   `:members` are exactly the ids whose root it is.
+2. Every key of `:memo` is canonical, and maps to the id of a node
+   stored under exactly that form.
+3. For every class `c` and every `[id n]` in `(:nodes c)`, `n` is
+   canonical, `id` is a member of `c`, and `:memo` maps `n` to `id`.
+   So no two stored nodes are equal. (Congruence closure.)
+4. For every class `c`, `(:parents c)` is exactly the ids of the
+   stored nodes that have `c` as a child.
 5. `:pending` and `:analysis-pending` are empty and `:dirty?` is false.
 6. Analysis data of every class is closed under joining `make` over
    its nodes: joining what the nodes say changes nothing. For a
@@ -159,13 +172,13 @@ operation:
    bendix's polynomial order it is "the smallest form ever derived".
 7. `:by-op` maps each operator to exactly the set of roots whose class
    holds a node with that operator. Unlike the others this one holds
-   at all times, not only after rebuild: `union` moves the smaller
-   class's operators to the new root as it merges.
-8. (Once scoped algorithms exist.) After a scope exit, every entry of
-   `:uf` points directly at its root (fully compressed).
+   at all times, not only after rebuild: `union` moves the merged
+   class's operators to the surviving root as it merges.
+8. Every entry of `:uf` points directly at its root. This one too
+   holds at all times: `union` repoints the merged class's members.
 
-Between `merge` and `rebuild` only 1 holds; that is the deferred
-rebuilding trade and it is what makes saturation fast.
+Between `union` and `rebuild` only 1, 7 and 8 hold; that is the
+deferred rebuilding trade and it is what makes saturation fast.
 
 ## 4. Core operations
 
@@ -176,43 +189,66 @@ All are pure. Operations that allocate an id return a pair.
 (add eg term)      -> [eg' id]   ;; whole term, hashconsed bottom-up
 (add-node eg node) -> [eg' id]   ;; one e-node with child ids
 (find eg id)       -> root-id
-(merge eg a b)     -> [eg' root] ;; union by size; queues the smaller class's parents in :pending
-(rebuild eg)       -> eg'        ;; restore invariants 2..7
-(class eg id)      -> class map
+(union eg a b)     -> [eg' root] ;; merges the class cheaper to move; queues its parents in :pending
+(rebuild eg)       -> eg'        ;; restore invariants 2..6
+(eclass eg id)     -> class map
 (nodes eg id)      -> #{canonical e-nodes of the class}
+(parents eg id)    -> [[canonical e-node, its class] ...]
 ```
 
-In v1 everything works on the persistent value directly: vector
-`assoc`, map `assoc`, a read-only `find` walk, algorithms as `reduce`
-over worklists. `find` is O(log n) by union by size; `rebuild` may
-compress the paths it touches since it is producing a new value
-anyway. The data model is shaped so that the batch algorithms
-(`rebuild`, `saturate`, `ematch`, `extract`, future AC machinery) can
-each later move inside a **scope** with mutable tables (section 5),
-one at a time, when a benchmark says that one is the bottleneck.
+Everything works on the persistent value directly: vector `assoc`,
+map `assoc`, algorithms as `reduce` over worklists. `find` is one
+vector read, because `union` keeps the union-find flat. Every
+operation writes what it changes and shares the rest with the value
+it was given (section 5, 2026-10-05), so the cost of an operation
+follows its change and not the size of the e-graph. The batch
+algorithms (`rebuild`, `saturate`, `ematch`, `extract`, future AC
+machinery) can each still move inside a **scope** with transient
+tables, one at a time, when a benchmark says that one is the
+bottleneck.
 
 **Rebuild** is egg's algorithm in its later, entry-granular form
-(egg 0.9's `process_unions`): the worklists hold parent *entries*
-`[parent-node class-id]`, not classes.
+(egg 0.9's `process_unions`): the worklist holds parent *nodes*, by
+id, not classes.
 
 ```
 union a b
-  root := the larger class (by size); queue every parent entry of the
-  smaller class on pending; if the joined analysis data differs from
-  either side's old data, queue that side's parents on analysis-pending
+  loser := the class with fewer members + parents (the younger root
+  on a tie); point every member of the loser at the other root; move
+  its nodes, parents and operators there; queue every parent of the
+  loser on pending; if the joined analysis data differs from either
+  side's old data, queue that side's parents on analysis-pending
 rebuild
   loop while pending or analysis-pending non-empty
     while pending non-empty
-      pop [p pid]; p' := canonicalize p ; root := find pid
-      if memo has p' -> other and find other ≠ root: union other root  ; queues more
-      memo[p'] := root
+      pop id; n := the node stored for id; n' := canonicalize n
+      skip when id is retired or n' is n
+      remove memo[n]
+      if memo has n' -> other: union other id; retire id   ; queues more
+      else memo[n'] := id; store n' for id in its class
     while analysis-pending non-empty
-      pop [p pid]; root := find pid
-      d := merge(data root, make(canonicalize p))
+      pop id; root := find id
+      d := merge(data root, make(n) for every node n of root)
       if d ≠ data root: data root := d; queue parents(root); modify root
-  one linear pass: point every id at its root, canonicalize every
-  class's nodes and parents, rebuild memo from the classes
 ```
+
+To retire a node is to remove it from its class's `:nodes` and from
+its children's `:parents`: the other node, the same in every child,
+stands for both. There is no final pass. Each of the four things a
+pass would repair is repaired where it breaks: the union-find by
+`union`, and the node, its hashcons key and the parent sets by the
+entry that re-keys the node. A node's id is what makes that cheap: a
+re-keyed node keeps its name, so its class's node map takes one write
+and no child's parent set changes. `rebuild` therefore writes the
+classes of the queued nodes and nothing else.
+
+Why the loser is chosen by members plus parents: a union's work is
+one union-find write per member of the loser and one re-keyed node
+per parent, so that sum is its cost, and merging the cheaper side
+bounds how often any one id or parent is moved by the logarithm of
+the total. egg chooses by parents alone and compresses paths as it
+reads; a persistent union-find cannot write on a read, so the
+members are counted too and moved at once.
 
 Why entries and not classes: the first version queued *classes* and
 re-processed every parent of a queued class. When many queued classes
@@ -224,9 +260,9 @@ parent visits for 105 000 distinct entries, 5.1 s for one iteration
 on the JVM. Entries are visited once each; with union by size an entry
 is re-queued at most log n times over the life of the e-graph, so
 rebuild is O(P log n) in the number of parent entries. The same
-iteration now takes 0.4 s. Stale hashcons keys are left in place
-until the final pass rebuilds the table; a canonical lookup can never
-hit one, because a non-root id never becomes a root again.
+iteration now takes 0.4 s. A stale hashcons key stays until the entry
+that re-keys its node removes it; a canonical lookup can never hit
+one meanwhile, because a non-root id never becomes a root again.
 
 Termination: each union strictly reduces the number of roots; each
 analysis change strictly climbs a finite lattice. Same argument as egg.
@@ -765,12 +801,103 @@ and Jolt 4.2 times, where the first measurement of this section read
 author's machine, so only the ratios between this project's own
 columns compare like with like.
 
+### Measured: the incremental rebuild (2026-10-05)
+
+The question was whether the value is persistent in fact: whether an
+operation costs what it changes and shares the rest. Counted on the
+JVM, on the bench's random terms at 121 489 nodes, as the class maps
+of the result that are the very objects of the input:
+
+| operation | classes shared | hashcons | time |
+|---|---|---|---|
+| add one term | 121 485 of 121 488 | path-copied | 1.5 µs |
+| one union | 121 487 of 121 488 | untouched | 0.8 µs |
+| rebuild after that one union | 0 | rebuilt from `{}` | 172 ms |
+
+`add` and `union` were persistent and `rebuild` was not. Its final
+pass (`compress-and-canonicalize`) rebuilt every class's node set and
+parent map and the whole hashcons whether or not anything had changed,
+linear in ids: 15 ms at 10 000 nodes, 50 at 36 000, 172 at 121 000.
+The runner rebuilds every iteration, so consecutive e-graphs of a run
+shared no class and no hashcons structure, and a timeline entry cost
+a full copy. On AC-10 the pass was 483 ms of a 688 ms rebuild phase,
+the worklist 205; iteration 9 queued 27 entries, drained them in
+0.14 ms and spent 77 ms in the pass, after which 1 001 of its 1 023
+node sets were equal to their predecessors and none the same object.
+That answers the question the 09-27 run left open: the rebuild gap
+was the pass.
+
+**Decisions (built the same day).**
+
+1. **A node is named by the id it was born with** (section 2).
+   `:nodes` is a map from that id to the node, `:parents` a set of
+   ids, and the worklist holds ids. A re-keyed node keeps its name:
+   the entry writes the node in its class and two hashcons keys, and
+   no child's parent set changes. With the node as its own key, as
+   before, the same repair replaces it in its class's set and in every
+   child's parent map, about eight writes. Explanations (section 11)
+   need these ids anyway.
+2. **The union-find is flat.** A class keeps its member ids and
+   `union` points every member of the merged class at the surviving
+   root, so `find` is one `nth` with no loop, at all times. On AC-10
+   the merged class held 1.08 ids per union (163 609 over 150 980
+   unions), so this is about the one write `union` made already.
+3. **The class cheaper to move is the one merged**: fewer members
+   plus parents, the younger root on a tie (section 4). Before, the
+   count of ids decided and a tie went to the first argument, which
+   in the runner is the right-hand side just instantiated, so every
+   parent of the matched class was re-keyed. Counted on the old
+   trajectory, choosing by parents would have queued 95 351 entries
+   for 113 833 on AC-10 and 48 062 for 159 067 on the egg rules.
+4. **No final pass.** Each thing it repaired is repaired where it
+   breaks (section 4), and `:size` is gone.
+
+**Measured when built**, medians of three after a warm-up, before and
+after run back to back; the phase in brackets is rebuild:
+
+| fixture | JVM before | JVM after | Jolt 0.8.17 before | Jolt 0.8.17 after |
+|---|---|---|---|---|
+| add-terms, 20 000 | 132 ms | 123 ms | 304 ms | 276 ms |
+| ematch `[:+ ?a [:* ?b ?c]]` | 7.2 ms | 7.3 ms | 18.6 ms | 14.6 ms |
+| 2 000 unions, one rebuild | 65 ms (59) | 7.6 ms (2.4) | 101 ms (91) | 10.5 ms (2.9) |
+| 50 × (one union, rebuild), 36 000 nodes | 2 815 ms | 0.2 ms | 4 669 ms | 0.2 ms |
+| egg rules, 2 iterations | 717 ms (459) | 321 ms (123) | 1 177 ms (637) | 667 ms (212) |
+| chain-collapse, 2 000 | 7.6 ms | 6.1 ms | 17.1 ms | 13.2 ms |
+| ac-sum 8 | 173 ms (43) | 139 ms (14) | 375 ms (71) | 297 ms (29) |
+| ac-sum 10 | 3 513 ms (702) | 2 866 ms (337) | 6 523 ms (989) | 6 031 ms (654) |
+
+Node and class counts are unchanged in every fixture on both runtimes.
+Decision 3 alone, on the old representation: the egg rules' rebuild
+501 → 314 ms on the JVM and 612 → 428 on Jolt, AC-10 within noise.
+
+The projection for AC-10 was about break-even, three or four writes
+an entry for one. It was wrong: the worklist grew by about two thirds
+and the pass, seven tenths of the phase, went. AC-10's search and
+apply are unchanged within noise; apply is still the largest phase.
+
+What the value shares now, the same counts as above at 121 489 nodes:
+a rebuild after one union shares 121 487 of 121 488 classes and the
+hashcons itself, in 0.4 µs. On AC-10, iteration 9 leaves 1 001 of
+1 023 node maps the very objects they were, every one that is equal,
+and its rebuild takes 0.1 ms; and of the 3 763 roots that enter
+iteration 6, 1 012 are still roots after it where 657 were.
+
+A consequence to know: which root survives a union changed, so ids
+differ from before and a tied extraction can come out the other way
+(section 8). The id-free tie-break proposed there would end that.
+
+Open after this: `roots` and `class-count` still scan every id, 153 000
+of them for AC-10's 1 023 classes; a count kept by `add-node` and
+`union` would make the second free. Transients over apply stand where
+they stood.
+
 ### What persistence still buys, unchanged
 
 - **Timelines.** `(saturate eg rules {:timeline? true})` retains the
   e-graph after each iteration, the same idea as
-  `catalytic.pure/timeline`; each retained value costs one O(n)
-  union-find vector. `(diff eg1 eg2)` is a set difference on `:memo`.
+  `catalytic.pure/timeline`; each retained value costs what its
+  iteration changed (2026-10-05, above; before that, a full copy).
+  `(diff eg1 eg2)` is a set difference on `:memo`.
 - **Speculation.** Run a risky or expensive burst of rules on a copy
   (free), keep it only if extraction improves. This is approach D in
   ../design/ac-problem.md and needs no undo log.
@@ -806,8 +933,9 @@ pattern is **compiled once** into a plan and matched by index loops:
 - `(compile p)`: variables become register numbers in order of first
   occurrence (registers as in egg's e-matching machine; the word slot
   is kept for slotted e-graphs, which this is not); a compound sub-pattern becomes its operator, arity and
-  child plans; a leaf becomes itself and is matched by membership in
-  a class's node set, as before. The plan is nested vectors,
+  child plans; a leaf becomes itself and is matched by one hashcons
+  lookup, which is exact with unions pending too because a leaf's key
+  never goes stale. The plan is nested vectors,
   `[:var register symbol]`, `[:node op arity plans]`, `[:leaf value]`,
   read with `nth`. (The design had a ground sub-pattern resolved to a
   class id by one lookup per search; on a graph with unions pending
@@ -1030,9 +1158,9 @@ Constant folding is the degenerate case.
   (`(with-egraph eg (add! ...) (merge! ...))`). Pairs for v1. If a
   scoped tier lands, exposing it as a public `with-scope` for callers
   who add thousands of terms is a later ergonomics call.
-- Should `:nodes` hold canonical or as-inserted e-nodes? egg keeps
-  as-inserted and canonicalizes in repair. Decide with the invariant
-  checker in hand.
+- Should `:nodes` hold canonical or as-inserted e-nodes? Answered
+  2026-10-05: canonical after `rebuild`, each under its node id; the
+  worklist entry that re-keys a node rewrites it (section 4).
 - Records vs maps on Jolt: measured 2026-09-25, maps (section 5,
   "Answered on the way").
 - One key layout or two, for ClojureScript: measured 2026-09-25, one
@@ -1213,6 +1341,24 @@ function (each node the cost of the cheapest term it heads, when a
 number), the roots, the class data (a bendix graph's polynomials)
 and how operators and leaves print. One smoke fact pins the text of
 `2·x + y` across the three runtimes.
+
+The incremental rebuild (2026-10-05, sections 2 to 5; 63 tests, 271
+assertions on both runtimes, Jolt 0.8.17): `cromulent.core` names a
+node by the id it was born with (`:nodes` a map from id to node,
+`:parents` a set of ids, `:members` the ids of the class, `:size`
+gone), keeps the union-find flat in `union`, merges the class that is
+cheaper to move, and repairs nodes, hashcons keys and parent sets in
+the worklist, so `rebuild` has no final pass and writes only the
+classes of the queued nodes; `parents` is the public read of a class's
+parent nodes. `cromulent.pattern` matches a leaf by one lookup and
+walks `:nodes` with `reduce-kv`, as `cromulent.extract` does;
+`cromulent.check` verifies the flat union-find, the members, the node
+ids and the parent sets. Four tests: a rebuild shares every class it
+does not touch, `find` is one read before any rebuild, the cheaper
+class is the one moved, `parents`. The bench gained a row, a rebuild
+after each of 2 000 unions (14 ms on the JVM, 12 on Jolt; it was
+linear in the e-graph per rebuild). ac-sum 10: JVM 3.5 → 2.9 s, Jolt
+6.5 → 6.0 s; the egg rules 717 → 321 ms and 1 177 → 667.
 
 Not yet: explanations, relational e-matching; the AC experiments
 beyond 1–3 live in bendix. CI workflow is written but the repository

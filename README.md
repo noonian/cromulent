@@ -30,7 +30,10 @@ implementation of the ideas this one follows.
 
 `add` shares every subterm already present. `union` is deferred:
 call `rebuild` before relying on congruence or the hashcons. `nodes`
-returns the canonical e-nodes of a class; `eclass` the class map.
+returns the canonical e-nodes of a class and `parents` the nodes that
+have it as a child; `eclass` returns the class map, whose shape is the
+implementation's. Each operation writes what it changes and shares
+the rest with the e-graph it was given, `rebuild` included.
 
 **Patterns** are terms with `?variables`; matching finds every class
 and binding where one occurs, and `instantiate` builds the other side:

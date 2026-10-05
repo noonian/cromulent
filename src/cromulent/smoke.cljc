@@ -131,13 +131,15 @@
      (fact "sum of five, simple: nodes after each iteration" [19 45 98 162 187 185 185] (mapv :nodes (:stats ac-simple)))
      (fact "sum of five, simple: classes after each iteration" [12 22 35 39 33 31 31] (mapv :classes (:stats ac-simple)))
      (fact "sum of five, simple: invariants hold" true (empty? (check/violations (:egraph ac-simple))))
-     (fact "sum of five, simple: every arrangement costs 9 (a tie; the term is not asserted)" 9 (:cost (ex/extract (:egraph ac-simple) r5)))
+     (fact "sum of five, simple: every arrangement costs 9, and the tie goes to the smallest term"
+           {:cost 9 :term [:+ :a0 [:+ :a1 [:+ :a2 [:+ :a3 :a4]]]]}
+           (ex/extract (:egraph ac-simple) r5))
      (fact "sum of five, backoff: same counts, more iterations, a ban seen"
            [31 185 :saturated true true]
            [(eg/class-count (:egraph ac-backoff)) (eg/node-count (:egraph ac-backoff)) (:stop-reason ac-backoff)
             (< (:iterations ac-simple) (:iterations ac-backoff))
             (boolean (some (comp seq :banned) (:stats ac-backoff)))])
-     (fact "taste: a*2 = a<<1 costs 3 under ast-size (a tie; the term is not asserted)" 3 (:cost (ex/extract g3 m3)))
+     (fact "taste: a*2 = a<<1 costs 3 under ast-size, and the tie goes to the smaller term" {:cost 3 :term [:* :a 2]} (ex/extract g3 m3))
      (fact "taste: a cost that charges * ten picks the shift" {:cost 3 :term [:<< :a 1]} (ex/extract g3 m3 expensive-mul))
      (fact "analysis: 1 + 2*3 folds to 7 and joins the class of 7"
            [7 true]

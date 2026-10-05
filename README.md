@@ -81,7 +81,9 @@ search ran on. The default scheduler is egg's backoff (`:scheduler
 match and application counts and phase timings for every iteration,
 and `:timeline? true` keeps every intermediate e-graph. Cost
 functions are `(fn [e-node child-costs] number)`; `ex/extractor`
-shares one cost table across many extractions.
+shares one cost table across many extractions. Of terms that cost the
+same, the smallest under `cromulent.term/compare-nodes` is the one
+extracted, whatever ids the classes have.
 
 An **e-class analysis** attaches lattice data to every class and may
 merge classes it proves equal; several run side by side, each under
@@ -125,9 +127,9 @@ overflow throws. `cromulent.smoke` (under `src/`) is a vector of
 runtime-stable facts about fixed runs, asserted by the suite on the
 JVM and Jolt and by orrery's node build on ClojureScript: class and
 node counts, iterations, stop reasons, per-rule counts and costs are
-identical on the three runtimes. Root ids and tied extractions are
-not: hash iteration order differs per runtime, so a term is asserted
-across runtimes only when its cost is a unique minimum. The test
-suites and the bench stay JVM and Jolt.
+identical on the three runtimes, and so are extracted terms, ties
+included: a tie goes to the smaller term, and the order reads no id.
+Root ids are not identical: hash iteration order differs per runtime.
+The test suites and the bench stay JVM and Jolt.
 
 [IDEA.md](IDEA.md) is the design and status.

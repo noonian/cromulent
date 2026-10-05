@@ -28,8 +28,30 @@
         expensive-mul (fn [node child-costs]
                         (+ (if (and (term/compound? node) (= :* (term/operator node))) 10 1)
                            (reduce + child-costs)))]
-    (is (contains? #{[:* :a 2] [:<< :a 1]} (:term (ex/extract g m))) "a tie under ast-size")
+    (is (= {:cost 3 :term [:* :a 2]} (ex/extract g m)) "a tie under ast-size goes to the smaller term")
     (is (= {:cost 3 :term [:<< :a 1]} (ex/extract g m expensive-mul)))))
+
+(deftest ties-do-not-depend-on-ids
+  ;; x + y = y + x under f, with the two sums added in either order and
+  ;; the union asked either way round: the ids differ, the extracted
+  ;; terms do not
+  (let [run (fn [t1 t2 flip?]
+              (let [[g a] (eg/add (eg/egraph) t1)
+                    [g b] (eg/add g t2)
+                    [g f] (eg/add g [:f t1])
+                    g (eg/rebuild (first (if flip? (eg/union g b a) (eg/union g a b))))]
+                [(ex/extract g a) (ex/extract g f)]))
+        xy [:+ :x :y], yx [:+ :y :x]]
+    (is (= [{:cost 3 :term xy} {:cost 4 :term [:f xy]}]
+           (run xy yx false) (run xy yx true) (run yx xy false) (run yx xy true))
+        "the smaller term, at the root and under a parent")))
+
+(deftest the-table-holds-the-term-of-every-class
+  (let [[g s] (eg/add (eg/egraph) [:+ [:* :a 1] :b])
+        table (ex/best-costs g ex/ast-size)
+        product (eg/lookup g [:* (eg/lookup g :a) (eg/lookup g 1)])]
+    (is (= {:cost 5 :node [:+ product (eg/lookup g :b)] :term [:+ [:* :a 1] :b]} (nth table s)))
+    (is (= {:cost 3 :node [:* (eg/lookup g :a) (eg/lookup g 1)] :term [:* :a 1]} (nth table product)))))
 
 (deftest vector-costs-compare-lexicographically
   ;; [shifts size]: fewer shifts first, then the smaller term

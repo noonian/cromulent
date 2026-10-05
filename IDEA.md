@@ -64,8 +64,8 @@ exception class, so the runner's two `catch` clauses are
 `#?(:clj Exception :default :default)`; and the clock is
 `cromulent.platform/now-ms`, the one file with reader conditionals,
 as `catalytic.defaults` is for catalytic-buffer. Hash iteration order
-differs there too, so root ids and tied extractions are stable per
-runtime only (section 8). No ratio or bignum exists; that is bendix's
+differs there too, so root ids are stable per runtime only;
+extraction reads no id and is the same everywhere (section 8). No ratio or bignum exists; that is bendix's
 problem, not this library's.
 
 Measured costs, one million operations, arm64 macOS:
@@ -883,8 +883,8 @@ and its rebuild takes 0.1 ms; and of the 3 763 roots that enter
 iteration 6, 1 012 are still roots after it where 657 were.
 
 A consequence to know: which root survives a union changed, so ids
-differ from before and a tied extraction can come out the other way
-(section 8). The id-free tie-break proposed there would end that.
+differ from before, and a tied extraction came out the other way
+until the tie-break stopped reading ids, the same day (section 8).
 
 Open after this: `roots` and `class-count` still scan every id, 153 000
 of them for AC-10's 1 023 classes; a count kept by `add-node` and
@@ -1059,22 +1059,40 @@ a lexicographic cost such as bendix's `no-D` (../bendix/IDEA.md
 section 6), and the extractor compares costs with `compare`. Bottom-up fixpoint over all classes, egg's Extractor, costs in a
 vector indexed by class id: iterate until no class's best cost
 changes; a node whose child has no cost yet is skipped, which is why
-cycles (`x = x + 0`) are harmless. Then rebuild the term top-down from each class's best node.
-`extractor` returns a function of a class id that shares one cost
-table across many extractions; `yoink` is `extract`'s alias. Ties
-between equal-cost nodes go to the smaller node under
-`cromulent.term/compare-nodes`, a total order that is the same on
-every runtime, so extraction is a function of the e-graph value. It
-is not, however, the same across runtimes when costs tie: the order
-compares child *ids*, and which id survives a union depends on the
-order matches are applied, which follows hash iteration order
-(reductions over `:by-op` sets and `:parents` maps) and differs per
-runtime. Costs, counts and per-rule totals agree everywhere; a
-term is runtime-stable when its minimum is unique. An id-free
-tie-break (comparing the built terms) is a later, benchmarked change. The cost
-function must be monotone (a node costs strictly more than any child)
-or a cyclic node can be chosen. bendix supplies cost functions that
-encode taste (../bendix/IDEA.md); the core guarantees the minimum.
+cycles (`x = x + 0`) are harmless. `extractor` returns a function of
+a class id that shares one table across many extractions; `yoink` is
+`extract`'s alias.
+
+**Ties are settled by terms, never by ids** (2026-10-05). After the
+fixpoint, each class takes, of the nodes that head a term of its
+cheapest cost, the one whose *term* is smallest under
+`cromulent.term/compare-nodes`, the term of each child being the one
+settled for the child's class; the table holds that term beside the
+cost and the node, `{:cost :node :term}`, so an extraction is a read.
+The order is total on terms and the same on every runtime, and it
+reads no id, so extraction is a function of what the e-graph says:
+the same on the JVM, Jolt and ClojureScript, the same whichever root
+a union kept, the same whatever order the terms were added in. The
+smoke facts assert tied terms on all three runtimes. Before, the tie
+went to the smaller *node*, which compares child ids: stable on one
+runtime and different across them, and it moved when the union rule
+did (section 5), which is what a bendix test pinned to a tie caught.
+The settling is a memoized walk down from each class; under a monotone
+cost the cheapest nodes of a class never reach it again, and a node
+that does is passed over. Measured, the table for every class: 36 000
+random nodes 29 → 44 ms on the JVM and 73 → 79 on Jolt 0.8.17; the
+saturated ac-sum 9, where every node of a class ties, 19 → 24 and
+56 → 53. A class of one node asks for no cost again, and the table
+being settled is a transient: without those two the first row read 49
+and 103.
+
+What the order prefers is its own business and not taste: numbers
+before keywords before compound terms, the shorter node first, so
+`1 + a` before `a + 1`. A caller that wants its own spelling to win a
+tie says so in the cost. The cost function must be monotone (a node
+costs strictly more than any child) or a cyclic node can be chosen.
+bendix supplies cost functions that encode taste (../bendix/IDEA.md);
+the core guarantees the minimum.
 
 ## 9. E-class analyses
 
@@ -1142,7 +1160,8 @@ Constant folding is the degenerate case.
   vector of runtime-stable facts about fixed runs, plain data;
   `cromulent.smoke-test` asserts it on the JVM and Jolt, and orrery's
   node build (`npm run smoke` in ../orrery) prints the same rows on
-  ClojureScript. Never ids, never a tied term.
+  ClojureScript. Never ids; a tied term since 2026-10-05, when ties
+  stopped reading them (section 8).
 
 ## 11. Later
 
@@ -1359,6 +1378,16 @@ class is the one moved, `parents`. The bench gained a row, a rebuild
 after each of 2 000 unions (14 ms on the JVM, 12 on Jolt; it was
 linear in the e-graph per rebuild). ac-sum 10: JVM 3.5 → 2.9 s, Jolt
 6.5 → 6.0 s; the egg rules 717 → 321 ms and 1 177 → 667.
+
+Ties by terms (2026-10-05, section 8; 65 tests, 274 assertions on both
+runtimes, and the 74 facts of orrery's node build on ClojureScript):
+`cromulent.extract` settles a tie between equal-cost nodes by the
+terms they head under `compare-nodes` and never by ids, and
+`best-costs` holds each class's term beside its cost and node, so
+`extract` reads it. Two tests: the extracted term does not depend on
+the order terms were added in or on which way a union was asked, and
+the table holds every class's term. The two smoke facts that left a
+tied term unasserted now assert it.
 
 Not yet: explanations, relational e-matching; the AC experiments
 beyond 1–3 live in bendix. CI workflow is written but the repository

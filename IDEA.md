@@ -1415,232 +1415,46 @@ Constant folding is the degenerate case.
 
 ## Status
 
-Implemented (2026-09-13), tests green on JVM (Clojure 1.12) and Jolt
-v0.8.7 through both `clojure -M:test` and `jolt -M:test` / `jolt test`:
+What exists now. How each piece was built is in the git history;
+the measurements that decided it are in section 5.
 
-- `cromulent.term` — the representation seam (tagged vectors):
-  `compound?`, `operator`, `children`, `child`, `arity`, `make`,
-  `map-children`, `compare-nodes`. bendix's own vocabulary (what a
-  leaf means) sits above it in `bendix.term`.
-- `cromulent.core` — the persistent e-graph value: `egraph`, `add`,
-  `add-node`, `lookup`, `find`, `union`, `rebuild`, `eclass`, `nodes`, `data`,
-  `roots`, `class-count`, `node-count`, `canonicalize`; several
-  e-class analyses per e-graph under the section 9 contract
-  (`make` with the class id, `merge` with the e-graph, data maps keyed
-  by name, analysis-owned state, recompute on change).
-  Plain persistent Clojure throughout, as decided: no transients, no
-  arrays. `rebuild` drains the parent-entry congruence worklist and
-  the class-level analysis worklist of section 4 and then runs one
-  linear pass that compresses every union-find path, canonicalizes
-  every class's nodes and parents, and rebuilds the hashcons from the
-  classes; that pass is the first thing to amortize when a benchmark
-  says so.
-- `cromulent.pattern` — e-matching over the operator index and
-  `instantiate` (section 6).
-- `cromulent.rewrite` — rules as data (`rule`, `bidirectional`) with
-  pattern or searcher left-hand sides, matches that carry their own
-  right-hand side, `embiggen`/`saturate` with the
-  `:simple` and `:backoff` schedulers or a caller-supplied one,
-  iteration/node/time limits, per-iteration stats with phase timings,
-  optional timeline, the `:check` dev-mode oracle, failures that name
-  the rule (section 7).
-- `cromulent.extract` — `best-costs`, `extract`/`yoink`, `extractor`,
-  `ast-size`, deterministic ties (section 8); costs ordered with
-  `compare`, so a vector is a lexicographic cost (2026-09-13, for
-  bendix's `no-D`).
-- `cromulent.check` — `violations` / `check!` over the invariants in
-  section 3 (strict: after `rebuild`, memo keys, class nodes and parent
-  keys are all canonical and parent ids are roots; the operator index
-  is exact; analysis data equals the join over the class's nodes).
-- Tests (48 tests, 170 assertions). Core: the egg README example,
-  cycles, persistence, constant folding (a flat lattice nil < number <
-  :conflict, so contradictory scripts join to :conflict instead of
-  throwing), two analyses side by side with per-analysis joins,
-  analysis state surviving in the value, and five test.check
-  properties over random add/union/rebuild scripts: invariants hold
-  and rebuild is idempotent; the partition equals a naive reference
-  congruence closure; the same with the analysis on; the analysed
-  graph merges a superset of the reference; invariants hold with two
-  analyses. Matching: the egg README pattern,
-  repeated variables, ground and bare-variable patterns, matching
-  through a union, the index following unions before rebuild,
-  instantiate reusing nodes; and three properties: soundness,
-  completeness against a tree matcher, no duplicates. Rewriting: the
-  egg README example under both schedulers, computed right-hand sides
-  and guards, guards seeing the search snapshot whatever the rule
-  order, every limit, the sum-of-5 blowup matching the formula in
-  ../design/ac-problem.md (31 classes, 180 compound nodes), backoff
-  banning and recovering to the same e-graph as simple, timelines, a
-  custom scheduler, a searcher rule, a searcher whose matches carry
-  their own right-hand sides, failures naming the rule; and
-  four properties: random unsound rules over
-  random scripts keep every invariant; sound integer identities
-  (including two computed folding rules) preserve the value of every
-  node of every class under random assignments, checked through
-  extraction; a saturated e-graph is closed under its rules and
-  saturates again in one quiet iteration; simple and backoff reach
-  the same e-graph whenever both saturate. Extraction: smallest term,
-  a cost function that prefers shifts, cycles, a shared table; and a
-  property that every class's extracted term is a member of the
-  class, costs its size, and is no larger than any input term there.
-- `bench/` — deterministic across runtimes (identical node and class
-  counts); JVM numbers include JIT warm-up; nothing is tuned:
+Built, green on the JVM and Jolt, with `cromulent.smoke`'s facts
+holding in ClojureScript (orrery's node build and browser self-test):
 
-  | fixture | n | JVM | Jolt 0.8.13 |
-  |---|---|---|---|
-  | add-terms (random terms, depth ≤ 4; 35 967 distinct nodes) | 20 000 | 210 ms | 287 ms |
-  | ematch `[:+ ?a [:* ?b ?c]]` on the above (4 557 matches) | | 24 ms | 20 ms |
-  | ematch `[:+ ?x ?x]` on the above (32 matches) | | 12 ms | 13 ms |
-  | union + rebuild (random unions on the above) | 2 000 | 111 ms | 104 ms |
-  | extract, cost table for every class of the above | 35 967 | 50 ms | 70 ms |
-  | embiggen, egg README rules on the above, 2 iterations (→ 45 282 nodes, 22 871 classes) | 2 | 822 ms | 1 105 ms |
-  | chain-collapse (2 000-atom sum, all atoms unioned) | 2 000 | 8 ms | 17 ms |
-  | ac-sum, saturate a 7-atom sum under comm + assoc (127 classes, 1 939 nodes, 8 iterations) | 7 | 49 ms | 85 ms |
-  | ac-sum, the same with 8 atoms (255 classes, 6 058 nodes, 9 iterations) | 8 | 175 ms | 360 ms |
-  | ac-sum, 10 atoms (1 023 classes, 57 012 nodes, 10 iterations): the yardstick of section 5 | 10 | 3 414 ms | 6 379 ms |
+- `cromulent.term`: the representation seam for tagged vectors, with
+  `compare-nodes`, the total order that breaks extraction ties.
+- `cromulent.core`: the persistent e-graph value (section 4). Nodes
+  named by the id they were born with, a flat union-find, the packed
+  hashcons key (section 5, decision 2), an incremental `rebuild` that
+  writes only the classes of queued nodes, several e-class analyses
+  side by side (section 9), and epochs and stamps for what changed.
+- `cromulent.pattern`: patterns compiled to register programs,
+  `ematch`, `ematch-flat` with fresh-since-an-epoch matching, a single
+  pass for one-operator patterns, `instantiate` (section 6).
+- `cromulent.rewrite`: rules as data, with pattern or searcher
+  left-hand sides, guards and computed right-hand sides. The runner
+  is `start`/`step`/`finish` with `embiggen` (`saturate`) as the loop
+  over them; the `:simple` and `:backoff` schedulers or a caller's
+  own; stale matches skipped; limits, per-iteration stats, timelines
+  and the `:check` oracle (section 7).
+- `cromulent.extract`: `best-costs`, `extract` (`yoink`), `extractor`
+  and `ast-size`. Costs are ordered with `compare`, so a vector is a
+  lexicographic cost, and ties go to the smaller term (section 8).
+- `cromulent.check`: `violations` and `check!` over the invariants of
+  section 3.
+- `cromulent.export`: the egraph-serialize JSON, with a printer of its
+  own so the text is identical on the three runtimes.
+- `cromulent.gen`: test.check generators for terms, scripts and rules;
+  `cromulent.smoke`, the runtime-stable facts.
 
-  Measured 2026-09-27 on Jolt 0.8.13 (section 5 compares it with
-  0.8.12). On 2026-09-25, after the second pass (flat match buffers
-  and the register program, section 5) landed, on Jolt 0.8.12: egg
-  rules 802 and 1 315 ms, ac-sum 7 52 and 100, ac-sum 8 175 and 418,
-  ac-sum 10 3 287 and 7 060. After the first pass
-  alone, compiled patterns and packed keys: egg rules 747 and
-  1 380 ms, ac-sum 7 64 and 137, ac-sum 8 246 and 623, ac-sum 10
-  5 047 and 11 745; before both, on the same machine: ematch 57 and
-  68 ms, ac-sum 8 361 and 1 717 ms, ac-sum 10 7 511 and 21 090 ms. The
-  ac-sum rows are experiment 1 of ../design/ac-problem.md, the
-  baseline. The embiggen row is where the class-level worklist was
-  caught (section 4); the ac-sum 10 row is where the fresh-key
-  hashcons lookup and the interpreted matcher were caught (section
-  5).
+The suite pairs examples (egg's README among them) with properties
+against reference implementations: congruence closure against a
+naive one, matching against a tree matcher, sound rules preserving
+value, saturation closed under its rules, both schedulers and both
+settings of `:skip-stale?` reaching the same e-graph. `clojure
+-M:bench` prints the throughput fixtures. The AC-10 yardstick, last
+measured 2026-10-05, is 2.1 s on the JVM and 4.5 s on Jolt.
 
-Compiled patterns and packed hashcons keys (2026-09-25, sections 5
-and 6, green on both runtimes, the suite unchanged at 49 tests and
-172 assertions and bendix's at 70 and 366): `cromulent.pattern`
-compiles a pattern to a plan and matches with a register array and index
-loops, `ematch`, `match-class` and `instantiate` taking a pattern or
-its compiled form; `cromulent.core` keys the hashcons by a packed
-fixnum for nodes of arity two or less (`:memo`, with `:ops` and
-`:op-names` interning operators) and by the node for leaves and
-wider nodes (`:memo-other`), exposes `find-in` over the union-find
-vector and `memo-entries` for the checker, and `canonicalize` is an
-index loop; `cromulent.rewrite` compiles each rule's pattern sides
-once per run; `cromulent.term/make` builds small nodes without
-`into`; the checker verifies the operator table and reads the
-hashcons through `memo-entries`. The bench gained the ac-sum 10 row.
-bendix's bench rows are unchanged or faster on both runtimes.
-
-Flat match buffers and the register program (2026-09-25, section 5
-second pass and section 6, green on both runtimes, the suites
-unchanged at 49/172 and 70/366): `cromulent.pattern/compile` takes
-fixed variables and emits an instantiation program; `ematch-flat`
-writes matches as class root and registers into a reusable
-`long-array`; `instantiate-registers` runs the program with
-packed-key lookups and `add-node` only on a miss, and `instantiate`
-is a wrapper over it; `cromulent.core/packed-key`;
-`cromulent.rewrite` compiles a right-hand pattern against its
-left-hand side's registers, keeps one buffer per pattern rule per
-run, applies flat matches without allocating on a hit, and counts
-matches with `match-count`. AC-10: Jolt 12.3 → 7.1 s, JVM 5.1 →
-3.6 s.
-
-Portable to ClojureScript (2026-09-25, for ../orrery; sections 1, 5
-decision 2, 8, 10; green on both primary runtimes, 51 tests and 204
-assertions, bendix unchanged at 70/366): the six source namespaces
-renamed `.clj` → `.cljc` with no change but the port's four edits;
-the packed key narrowed to `op·2^42 + a·2^21 + b` with the bench
-medians unchanged; `cromulent.platform` (the clock) as the one
-conditional file; backoff doubling by `times-pow2`; the two `catch`
-clauses conditional; `cromulent.smoke`, 28 runtime-stable facts,
-asserted by the suite here and by orrery's node build (all 28 pass,
-54 ms, zero compiler warnings on the engine). The tests and the bench
-stay `.clj`.
-
-The runner as start/step/finish (2026-09-25, section 7, for orrery's
-lesson 5; 52 tests, 210 assertions on both runtimes):
-`cromulent.rewrite/start` compiles the rules, initializes the
-scheduler and rebuilds the input; `step` runs one iteration with the
-limit checks in `embiggen`'s order; `finish` returns the result map;
-`embiggen` is the loop over the three, so a caller that steps a run
-from a timer gets exactly the run one call would make, bans and all.
-
-The exporter (2026-09-26, for ../orrery; 57 tests, 250 assertions on
-both runtimes): `cromulent.export`, the e-graph in the egraph-serialize
-JSON format that egg, egglog and the egraphs-good tools share.
-`serialize` gives the data with string keys, `json` the text, and
-`->json` is a printer of its own, so the same text comes out on the
-JVM, on Jolt and in ClojureScript and no runtime prints a ratio; a
-node is named `class.i` in `compare-nodes` order and a child is the
-first node of its class, as egg names them; options give the cost
-function (each node the cost of the cheapest term it heads, when a
-number), the roots, the class data (a bendix graph's polynomials)
-and how operators and leaves print. One smoke fact pins the text of
-`2·x + y` across the three runtimes.
-
-The incremental rebuild (2026-10-05, sections 2 to 5; 63 tests, 271
-assertions on both runtimes, Jolt 0.8.17): `cromulent.core` names a
-node by the id it was born with (`:nodes` a map from id to node,
-`:parents` a set of ids, `:members` the ids of the class, `:size`
-gone), keeps the union-find flat in `union`, merges the class that is
-cheaper to move, and repairs nodes, hashcons keys and parent sets in
-the worklist, so `rebuild` has no final pass and writes only the
-classes of the queued nodes; `parents` is the public read of a class's
-parent nodes. `cromulent.pattern` matches a leaf by one lookup and
-walks `:nodes` with `reduce-kv`, as `cromulent.extract` does;
-`cromulent.check` verifies the flat union-find, the members, the node
-ids and the parent sets. Four tests: a rebuild shares every class it
-does not touch, `find` is one read before any rebuild, the cheaper
-class is the one moved, `parents`. The bench gained a row, a rebuild
-after each of 2 000 unions (14 ms on the JVM, 12 on Jolt; it was
-linear in the e-graph per rebuild). ac-sum 10: JVM 3.5 → 2.9 s, Jolt
-6.5 → 6.0 s; the egg rules 717 → 321 ms and 1 177 → 667.
-
-Ties by terms (2026-10-05, section 8; 65 tests, 274 assertions on both
-runtimes, and the 74 facts of orrery's node build on ClojureScript):
-`cromulent.extract` settles a tie between equal-cost nodes by the
-terms they head under `compare-nodes` and never by ids, and
-`best-costs` holds each class's term beside its cost and node, so
-`extract` reads it. Two tests: the extracted term does not depend on
-the order terms were added in or on which way a union was asked, and
-the table holds every class's term. The two smoke facts that left a
-tied term unasserted now assert it.
-
-Stale matches skipped (2026-10-05, sections 2, 5 and 7; 70 tests, 300
-assertions on both runtimes; bendix's 93 and orrery's 97 unchanged
-and green against it, with orrery's node and browser builds):
-`cromulent.core` keeps `:epoch`, advanced by `next-epoch`, a stamp
-per node in `:stamps` and one per class, written where a node is
-added, moved or re-keyed, and `node-id`; `cromulent.pattern`'s
-matcher tells its callback whether a match is fresh since an epoch,
-and `ematch-flat` takes that epoch, writes the fresh matches and
-counts them all; `cromulent.rewrite` advances the epoch each
-iteration, remembers per rule the epoch it last applied its matches
-at, and searches a rule that repeats itself for what is fresh since;
-`:skip-stale?` turns it off, and an iteration that changes nothing
-returns the e-graph it was given. Tests: nodes and classes are stamped
-when they change; fresh matches by a union, by new nodes and by a
-leaf that moved; a scheduler that notes what comes back to be applied;
-and a property, the run with and without skipping agrees on every
-count after every iteration, on the partition and on every extraction.
-ac-sum 10: JVM 2.8 → 2.1 s, Jolt 6.2 → 4.5 s.
-
-One operator, one pass (2026-10-05, sections 5 and 6; 73 tests, 308
-assertions on both runtimes; bendix's 93 and orrery's 97 unchanged
-and green against it, with orrery's node and browser builds):
-`cromulent.pattern` only. `ematch-flat` matches a pattern of one
-operator over variables and leaves in one pass over that operator's
-nodes (`match-one-node`); a deeper pattern is walked as before. The
-matches written, their order, the counts and so every run are what
-they were. Counting the stale matches of deeper patterns instead of
-walking them was built, measured and set aside (section 5). Tests: a
-property over two scripts with an epoch between them, the matches
-written are those with a node stamped since, found from the bindings
-by lookup, in `ematch`'s order, and the count is `ematch`'s, for
-one-operator and deeper patterns with and without a repeated
-variable; freshness from either child; a buffer smaller than one
-match, which overflowed before. egg rules search: 82 → 64 ms on the
-JVM, 135 → 96 on Jolt.
-
-Not yet: explanations, relational e-matching; the AC experiments
-beyond 1–3 live in bendix. CI workflow is written but the repository
-has no remote.
+Not yet: explanations (ideas/explanations.md), relational
+e-matching, and the rest of section 11. The AC experiments beyond 1
+to 3 live in bendix.

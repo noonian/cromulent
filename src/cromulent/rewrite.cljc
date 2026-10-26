@@ -199,6 +199,30 @@
       (reset! cell buf)
       {:buf buf :n n :found found})))
 
+(defn- raw [p]
+  (if (pat/compiled? p) (:pattern p) p))
+
+(defn- union-applied
+  "g with the class of id, an instance of the right-hand side, merged
+  into the matched class x. With a journal (cromulent.core,
+  :explain?) the union is between the nodes the rule applied to, with
+  the reason an explanation needs: the rule's name, both sides as
+  patterns, the bindings, and where each side occurs
+  (cromulent.pattern/witness), the left-hand side's in snapshot, where
+  the match was found. computed? says the right-hand side is not the
+  rule's own pattern: a computed one, a match's own, or a searcher's."
+  [snapshot g rule lhs rhs bindings id x computed?]
+  (if-not (:journal g)
+    (first (eg/union g id x))
+    (let [lhs (when-not (fn? lhs) (raw lhs))
+          rhs (raw rhs)
+          wl (when lhs (pat/witness snapshot lhs bindings))
+          wr (pat/witness g rhs bindings)
+          a (if wl (pat/witness-id lhs wl) x)
+          b (if wr (pat/witness-id rhs wr) id)]
+      (first (eg/union g a b {:rule (:name rule) :lhs lhs :rhs rhs :bindings bindings
+                              :lhs-witness wl :rhs-witness wr :computed? computed?})))))
+
 (defn- apply-rule
   "Apply every match map of rule to g. snapshot is the e-graph the
   matches were found in, which is what the guard and a computed rhs
@@ -208,7 +232,7 @@
   refusing a merge, say) is rethrown with the rule's name and the
   match in its data."
   [snapshot g rule matches]
-  (let [{:keys [rhs], guard :when} rule]
+  (let [{:keys [lhs rhs], guard :when} rule]
     (reduce (fn [[g n] {:keys [class bindings] :as m}]
               (try
                 (if (and guard (not (guard snapshot bindings)))
@@ -222,7 +246,9 @@
                       (let [[g id] (pat/instantiate g p bindings)]
                         (if (= (eg/find g id) (eg/find g class))
                           [g n]
-                          [(first (eg/union g id class)) (inc n)])))))
+                          [(union-applied snapshot g rule lhs p bindings id class
+                                          (or (contains? m :rhs) (fn? rhs) (fn? lhs)))
+                           (inc n)])))))
                 (catch #?(:clj Exception :default :default) e
                   (throw (ex-info (str "rule " (:name rule) " failed: " (ex-message e))
                                   (assoc (or (ex-data e) {}) :rule (:name rule) :match m)
@@ -272,7 +298,11 @@
                         uf (:uf g)]
                     (if (= (eg/find-in uf id) (eg/find-in uf x))
                       (recur (inc m) (+ base stride) g applied)
-                      (recur (inc m) (+ base stride) (first (eg/union g id x)) (inc applied)))))
+                      (recur (inc m) (+ base stride)
+                             (if (:journal g)
+                               (union-applied snapshot g rule lhs rhs (bindings-at vars buf base) id x false)
+                               (first (eg/union g id x)))
+                             (inc applied)))))
 
               :else
               (let [bindings (bindings-at vars buf base)
@@ -282,7 +312,9 @@
                   (let [[g id] (pat/instantiate g p bindings)]
                     (if (= (eg/find g id) (eg/find g x))
                       (recur (inc m) (+ base stride) g applied)
-                      (recur (inc m) (+ base stride) (first (eg/union g id x)) (inc applied))))))))
+                      (recur (inc m) (+ base stride)
+                             (union-applied snapshot g rule lhs p bindings id x true)
+                             (inc applied))))))))
           [g applied]))
       (catch #?(:clj Exception :default :default) e
         (let [base (aget cur 0)]

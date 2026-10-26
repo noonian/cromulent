@@ -109,6 +109,35 @@ See `test/cromulent/core_test.clj` for a complete constant-folding
 analysis, and `cromulent.check/violations` for the invariants a
 rebuilt e-graph satisfies.
 
+**Explanations** say why two terms are equal. An e-graph made with
+`:explain? true` keeps a journal of every node it adds and every union
+that merges two classes; `cromulent.explain` turns it into a
+derivation, and `cromulent.derivation`, which shares no code with the
+e-graph, checks the derivation against the rules:
+
+```clojure
+(require '[cromulent.explain :as x] '[cromulent.derivation :as derivation])
+
+(let [[g _] (eg/add (eg/egraph {:explain? true}) [:+ 0 [:* 1 :a]])
+      {g :egraph} (rw/embiggen g rules)
+      p (x/explain-terms g [:+ 0 [:* 1 :a]] :a)]
+  [p (derivation/check p rules)])
+;; => [[:trans [:rule "commute-add" {?a 0, ?b [:* 1 :a]}]
+;;             [:rule "add-0" {?a [:* 1 :a]}]
+;;             [:rule "commute-mul" {?a 1, ?b :a}]
+;;             [:rule "mul-1" {?a :a}]]
+;;     {:ok? true :lhs [:+ 0 [:* 1 :a]] :rhs :a :trusted []}]
+```
+
+A derivation is data: `:refl`, `:sym`, `:trans`, `:cong` over the
+children, and `:rule` with its bindings. It is a proof in equational
+logic with the rules as axioms: it shows the equation follows from
+them, not that it is true. A union the caller asserted
+(`(eg/union g a b reason)`), an analysis's merge and a computed
+right-hand side are `:asserted` and `:computed` steps, which the
+checker accepts on trust and lists under `:trusted`. Derivations
+are written out in full, so a long run can make a long one.
+
 ## Running
 
 ```

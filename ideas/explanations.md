@@ -1,9 +1,11 @@
 # Explanations and a proof checker
 
-A proposal, written 2026-10-05. Nothing here is built, and the design
-has been reasoned against the code but not prototyped. It fills in
-"Explanations" in IDEA.md section 11, which ../bendix/IDEA.md calls
-"cromulent's explanations milestone".
+A proposal, written 2026-10-05. Sections 1 and 2 are built
+(2026-10-25): the journal in `cromulent.core`, explanations in
+`cromulent.explain`, the checker in `cromulent.derivation`; section
+5 records what the building decided, the name among it. Sections 3 and 4 are as written.
+It fills in "Explanations" in IDEA.md section 11, which
+../bendix/IDEA.md calls "cromulent's explanations milestone".
 
 ## The short of it
 
@@ -171,19 +173,55 @@ The same pieces serve bendix in the other direction: a result that
 wants a kernel's assurance exports its explanation as a proof term.
 That wants typed terms and a named lemma for every rule.
 
-## 5. Open questions
+## 5. Open questions, and what building answered
 
-- A journal in the value, or a callback the core invokes? The journal
-  is data, survives in timelines, and diffs; a callback keeps the
-  core ignorant of the format.
-- The birth table, or a fresh id for every syntactically new term,
-  unioned in by congruence, as egg does? The first leaves `add-node`
-  alone; the second makes term-level questions direct.
-- How the matched node's id travels: a slot in the flat buffer, or a
-  hashcons lookup of the instantiated left-hand side in the snapshot
-  for the matches that merge.
-- What a reason is: a name, a name and bindings, or the step
-  checker's whole input.
+Answered 2026-10-25, by the prototype:
+
+- **Derivations, not proofs** (decided 2026-10-26). What `explain`
+  returns is a proof in equational logic with the rules as axioms: it
+  shows an equation follows from them, not that it is true, and its
+  trusted steps are hypotheses. The code calls it a derivation, the
+  word term rewriting uses, and the checker `cromulent.derivation`
+  (`check`, `derives?`), so that "proof" stays for what a kernel
+  checks (section 4). This note's sections 1 and 2 say "proof" as
+  they were written.
+
+- **A journal in the value.** `(egraph {:explain? true})` keeps
+  `:journal {:births [...] :unions [...]}` in the e-graph, so it
+  survives in timelines like everything else.
+- **The birth table.** `add-node` conjes the node it stores; nothing
+  else about it changed.
+- **A lookup, not a buffer slot.** With a journal, the runner looks
+  up where each side of a merging match occurs
+  (`cromulent.pattern/witness`), the left-hand side in the snapshot
+  the match was found in, and unions those two nodes. The flat buffer
+  is untouched, and without a journal the apply path is as before.
+- **A reason is any value**, `nil` when a caller gives none.
+  `rebuild`'s unions say `:congruence`; the runner's carry the rule's
+  name, both sides as patterns, the bindings and both witnesses, which
+  is the whole of what the explanation needs. A computed right-hand
+  side, a match's own and a searcher's are marked `:computed?`, and
+  their steps are trusted.
+- **Cost.** Nothing without a journal. With one, on the JVM, a few
+  per cent on the AC-10 yardstick (2.73 s against 2.82 s) and nothing
+  measurable on the egg rules row; on Jolt about a third on both
+  (AC-10 5.9 s against 7.8 s, egg rules 0.88 s against 1.22 s). The
+  Jolt cost is most likely the witness lookups the runner makes for
+  every merging match, which build a node to look up at every
+  position of both patterns; recording the matched node's id in the
+  flat buffer would remove the left-hand side's half, if a journaled
+  run on Jolt ever needs it. The bench has the rows, journal on and
+  off. A saturated sum of eight atoms explains its input against its
+  reverse in 8 ms on the JVM and 19 on Jolt.
+
+Still open:
+
+- bendix gives no reasons: its analysis merges arrive as `:asserted`
+  steps with a nil reason. "By ring normalization" wants a step
+  checker that lives in bendix, normalizing both sides.
+- Proofs are unshared trees, written out in full; a proof as a DAG,
+  or one shortened after the fact (Flatt et al. 2022), when one is
+  too long to read.
 - Generations (a term made by a rule in round r is not matched until
   later) as a scheduler beside backoff. Noticed in ansatz; unrelated
   to proofs.

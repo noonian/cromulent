@@ -6,9 +6,11 @@
   Inputs come from a small LCG so both runtimes build identical
   e-graphs. Numbers are printed as a table; IDEA.md records them."
   (:require [cromulent.core :as eg]
+            [cromulent.explain :as x]
             [cromulent.extract :as ex]
             [cromulent.pattern :as pat]
             [cromulent.platform :as platform]
+            [cromulent.derivation :as derivation]
             [cromulent.rewrite :as rw]))
 
 (defn- lcg
@@ -37,12 +39,12 @@
     [(- t1 t0) r]))
 
 (defn add-terms
-  "Add n random terms of depth <= d."
-  [n d]
+  "Add n random terms of depth <= d to (eg/egraph opts)."
+  [n d & [opts]]
   (let [next! (lcg 42)
         terms (vec (repeatedly n #(rand-term next! d)))
-        [ms g] (timed #(reduce (fn [g t] (first (eg/add g t))) (eg/egraph) terms))]
-    {:fixture "add-terms" :n n :ms ms :nodes (eg/node-count g) :classes (eg/class-count g) :egraph g}))
+        [ms g] (timed #(reduce (fn [g t] (first (eg/add g t))) (eg/egraph opts) terms))]
+    {:fixture (if (:explain? opts) "add-terms, journal" "add-terms") :n n :ms ms :nodes (eg/node-count g) :classes (eg/class-count g) :egraph g}))
 
 (defn union-rebuild
   "u random unions on g, then one rebuild."
@@ -111,13 +113,32 @@
   "Saturate a sum of n atoms under commutativity and associativity:
   experiment 1 of ../design/ac-problem.md, the baseline the AC work
   is measured against. Expect 2^n - 1 classes and 3^n - 2^(n+1) + 1 + n
-  nodes."
+  nodes. With opts {:explain? true} the e-graph keeps a journal."
+  [n & [opts]]
+  (let [atoms (mapv #(keyword (str "a" %)) (range n))
+        t (reduce (fn [acc a] [:+ acc a]) (first atoms) (rest atoms))
+        [g _] (eg/add (eg/egraph opts) t)]
+    (assoc (embiggen g (str "ac-sum " n (when (:explain? opts) ", journal")) ac-rules
+                     {:scheduler :simple :node-limit 1000000 :time-limit-ms 600000})
+           :n n)))
+
+(defn explain-ac
+  "Explain why the left-nested sum of n atoms equals its reverse,
+  right-nested, in the saturated journaled e-graph, and check the
+  derivation. n is its step count."
   [n]
   (let [atoms (mapv #(keyword (str "a" %)) (range n))
         t (reduce (fn [acc a] [:+ acc a]) (first atoms) (rest atoms))
-        [g _] (eg/add (eg/egraph) t)]
-    (assoc (embiggen g (str "ac-sum " n) ac-rules {:scheduler :simple :node-limit 1000000 :time-limit-ms 600000})
-           :n n)))
+        u (reduce (fn [acc a] [:+ a acc]) (first atoms) (rest atoms))
+        [g _] (eg/add (eg/egraph {:explain? true}) t)
+        g (:egraph (rw/embiggen g ac-rules {:scheduler :simple :node-limit 1000000 :time-limit-ms 600000}))
+        [ms-e p] (timed #(x/explain-terms g t u))
+        [ms-c ok] (timed #(derivation/derives? p ac-rules t u))
+        steps (fn steps [p] (case (first p) :trans (reduce + (map steps (rest p))) :sym (steps (second p))
+                              :cong (reduce + 0 (map steps (nth p 2))) :refl 0 1))]
+    (when-not ok (throw (ex-info "the explanation did not check" {:n n})))
+    {:fixture (str "explain ac-sum " n) :n (steps p) :ms (+ ms-e ms-c) :explain-ms ms-e :check-ms ms-c
+     :nodes (eg/node-count g) :classes (eg/class-count g)}))
 
 (defn extract
   "Cost every class of g under ast-size."
@@ -141,8 +162,16 @@
     (row (union-rebuild-each g 2000))
     (row (extract g))
     (row (embiggen g "egg rules, 2 iters" egg-rules {:scheduler :simple :iter-limit 2 :node-limit 1000000})))
+  (let [a (add-terms 20000 4 {:explain? true})]
+    (row a)
+    (row (embiggen (:egraph a) "egg rules, journal" egg-rules {:scheduler :simple :iter-limit 2 :node-limit 1000000})))
   (row (chain 2000))
   (row (ac-sum 7))
   (row (ac-sum 8))
   (row (ac-sum 10))
+  (row (ac-sum 8 {:explain? true}))
+  (row (ac-sum 10 {:explain? true}))
+  (let [r (explain-ac 8)]
+    (row r)
+    (println (format "  explain %.1f ms, check %.1f ms" (double (:explain-ms r)) (double (:check-ms r)))))
   (System/exit 0))

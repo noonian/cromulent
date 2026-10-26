@@ -6,6 +6,7 @@
             [cromulent.rewrite-test]
             [cromulent.extract-test]
             [cromulent.export-test]
+            [cromulent.explain-test]
             [cromulent.smoke-test]))
 
 (defn -main [& _]
@@ -14,5 +15,6 @@
                                           'cromulent.rewrite-test
                                           'cromulent.extract-test
                                           'cromulent.export-test
+                                          'cromulent.explain-test
                                           'cromulent.smoke-test)]
     (System/exit (if (pos? (+ fail error)) 1 0))))

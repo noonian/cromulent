@@ -9,9 +9,11 @@
   (`npx shadow-cljs compile smoke && node target/smoke.js`)."
   (:require [cromulent.check :as check]
             [cromulent.core :as eg]
+            [cromulent.explain :as explain]
             [cromulent.export :as export]
             [cromulent.extract :as ex]
             [cromulent.pattern :as pat]
+            [cromulent.derivation :as derivation]
             [cromulent.rewrite :as rw]
             [cromulent.term :as term]))
 
@@ -158,4 +160,30 @@
                 "    \"4.0\": {\n      \"op\": \"+\",\n      \"children\": [\"2.0\", \"3.0\"],\n      \"eclass\": \"4\",\n      \"cost\": 5\n    }\n"
                 "  },\n  \"root_eclasses\": [\"4\"],\n  \"class_data\": {}\n}")
            (let [[g id] (eg/add (eg/egraph) [:+ [:* 2 :x] :y])]
-             (export/json g {:cost ex/ast-size :roots [id]})))]))
+             (export/json g {:cost ex/ast-size :roots [id]})))
+     (fact "explain: a = b asserted, so f(a) = f(b) by congruence"
+           [[:cong :f [[:asserted :a :b "a = b"]]] true]
+           (let [g (eg/egraph {:explain? true})
+                 [g a] (eg/add g :a)
+                 [g b] (eg/add g :b)
+                 [g fa] (eg/add g [:f :a])
+                 [g fb] (eg/add g [:f :b])
+                 g (eg/rebuild (first (eg/union g a b "a = b")))
+                 p (explain/explain g fa fb)]
+             [p (derivation/derives? p [] [:f :a] [:f :b])]))
+     (fact "explain: sum of five, every id of every class proved equal to its root, nothing trusted"
+           true
+           (let [[g _] (eg/add (eg/egraph {:explain? true}) (sum-of 5))
+                 g (:egraph (rw/embiggen g ac-rules {:scheduler :simple}))]
+             (every? (fn [r]
+                       (every? (fn [m]
+                                 (let [p (explain/explain g m r)
+                                       {:keys [ok? lhs rhs trusted]} (derivation/check p ac-rules)]
+                                   (and ok? (empty? trusted)
+                                        (= lhs (explain/term g m)) (= rhs (explain/term g r)))))
+                               (:members (eg/eclass g r))))
+                     (eg/roots g))))
+     (fact "derivation: a chain whose links do not meet is refused at the second link"
+           [false [2]]
+           ((juxt :ok? :path)
+            (derivation/check [:trans [:rule "comm" '{?a :x ?b :y}] [:rule "comm" '{?a :x ?b :y}]] ac-rules)))]))

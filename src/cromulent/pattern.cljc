@@ -438,3 +438,33 @@
           (recur (inc i)))))
     (let [g (instantiate-registers g c regs)]
       [g (aget regs (:result c))])))
+
+;; ---------------------------------------------------------------------------
+;; witnesses
+
+(defn witness-id
+  "The id a witness w of pattern p stands for: the root node's id for a
+  compound, w itself for a variable or a leaf."
+  [p w]
+  (if (term/compound? p) (nth w 0) w))
+
+(defn witness
+  "Where pattern p occurs in g under bindings, node by node: a variable
+  as the id it is bound to, a leaf as its node's id, and a compound as
+  [node-id w1 ... wk], the id of a node of g whose canonical form is
+  the compound over its children's classes, then the children's
+  witnesses. nil when some node of the instance is not in g. Adds
+  nothing. A journal (cromulent.core, :explain?) records the witnesses
+  of both sides of a rule application, so an explanation can say which
+  nodes the rule was applied to."
+  [g p bindings]
+  (cond
+    (variable? p) (get bindings p)
+    (term/compound? p)
+    (let [cs (term/children p)
+          ws (mapv #(witness g % bindings) cs)]
+      (when (every? some? ws)
+        (when-let [nid (eg/node-id g (term/make (term/operator p)
+                                                (mapv (fn [c w] (eg/find g (witness-id c w))) cs ws)))]
+          (into [nid] ws))))
+    :else (eg/node-id g p)))

@@ -51,6 +51,15 @@
     :analysis-state
                map, analysis name -> whatever that analysis keeps
                (an index, say); the core never touches it
+    :journal   present only when the e-graph was made with :explain?:
+               {:births [node ...] :unions [[a b reason] ...]}. :births
+               holds, under each node id, the node as `add-node` stored
+               it, its children the ids they were then, so an id names
+               one term for good; :unions holds every union that merged
+               two classes, in order, a and b the ids it was given and
+               reason what it was given (:congruence for the unions
+               `rebuild` makes). The unions are the edges of a forest
+               over the ids: cromulent.explain reads derivations from it
 
   A class map is {:id :members :nodes :parents :data :stamp}: every
   id that names the class, as a vector; the e-nodes of the class, a
@@ -98,15 +107,20 @@
   when those ids stop being roots. The join's order must be
   well-founded (no infinite descending chains), which is what makes
   rebuild terminate; `rebuild` asserts it with a round limit and
-  throws rather than spin if an analysis breaks it."
+  throws rather than spin if an analysis breaks it.
+
+  With :explain? true the e-graph keeps a journal of node births and
+  merging unions, for cromulent.explain; it costs a `conj` per new
+  node and per merging union."
   ([] (egraph {}))
-  ([{:keys [analysis analyses]}]
-   {:next-id 0 :uf [] :memo {} :memo-other {} :ops {} :op-names []
-    :classes [] :by-op {}
-    :pending [] :analysis-pending [] :dirty? false
-    :epoch 0 :stamps []
-    :analyses (vec (concat (when analysis [analysis]) analyses))
-    :analysis-state {}}))
+  ([{:keys [analysis analyses explain?]}]
+   (cond-> {:next-id 0 :uf [] :memo {} :memo-other {} :ops {} :op-names []
+            :classes [] :by-op {}
+            :pending [] :analysis-pending [] :dirty? false
+            :epoch 0 :stamps []
+            :analyses (vec (concat (when analysis [analysis]) analyses))
+            :analysis-state {}}
+     explain? (assoc :journal {:births [] :unions []}))))
 
 (defn find-in
   "The canonical (root) id of the class containing id, read from the
@@ -340,6 +354,7 @@
                    (update :uf conj id)
                    (update :stamps conj (:epoch eg))
                    (memo-put node id)
+                   (cond-> (:journal eg) (update-in [:journal :births] conj node))
                    (update :classes conj {:id id :members [id] :nodes {id node} :parents #{} :data data
                                           :stamp (:epoch eg)}))
             eg (if (term/compound? node)
@@ -391,51 +406,55 @@
   flat, and its nodes are stamped with the epoch. Deferred: its
   parents are queued for `rebuild`, which re-keys them in the hashcons
   and finds the congruences that follow; nothing else is repaired
-  now."
-  [eg a b]
-  (let [ra (find eg a), rb (find eg b)]
-    (if (= ra rb)
-      [eg ra]
-      (let [classes (:classes eg)
-            wa (weight (nth classes ra)), wb (weight (nth classes rb))
-            [ra rb] (if (or (< wa wb) (and (= wa wb) (< rb ra))) [rb ra] [ra rb])
-            ca (nth classes ra), cb (nth classes rb)
-            analyses? (seq (:analyses eg))
-            by-op (reduce-kv (fn [idx _ node]
-                               (if (term/compound? node)
-                                 (update idx (term/operator node) #(conj (disj (or % #{}) rb) ra))
-                                 idx))
-                             (:by-op eg)
-                             (:nodes cb))
-            uf (reduce (fn [uf id] (assoc uf id ra)) (:uf eg) (:members cb))
-            ;; the nodes that change class sit beside nodes they did not before
-            epoch (:epoch eg)
-            stamps (reduce-kv (fn [stamps nid _] (stamp stamps nid epoch)) (:stamps eg) (:nodes cb))
-            eg (-> eg
-                   (assoc :by-op by-op)
-                   (assoc :uf uf)
-                   (assoc :stamps stamps)
-                   (assoc-in [:classes rb] nil)
-                   (assoc :dirty? true)
-                   (update :pending push-parents (:parents cb)))
-            ;; the join is provisional: rebuild recomputes the merged class
-            ;; from its nodes, and every parent whose child's data changed
-            data (when analyses? (merge-all eg (:data ca) (:data cb)))
-            eg (assoc-in eg [:classes ra] {:id ra
-                                           :members (merge-into (:members ca) (:members cb))
-                                           :nodes (merge-into (:nodes ca) (:nodes cb))
-                                           :parents (merge-into (:parents ca) (:parents cb))
-                                           :data data
-                                           :stamp epoch})
-            eg (if analyses?
-                 (-> (cond-> (update eg :analysis-pending conj ra)
-                       (not= data (:data ca)) (update :analysis-pending push-parents (:parents ca))
-                       (not= data (:data cb)) (update :analysis-pending push-parents (:parents cb)))
-                     (run-reconcile ra [(:data ca) (:data cb)]))
-                 eg)]
-        ;; a modify may union ra into another class
-        (let [eg (run-modify eg ra)]
-          [eg (find eg ra)])))))
+  now. reason, any value, is what a journal records for the union
+  when it merges two classes (see `egraph`, :explain?); nil when not
+  given."
+  ([eg a b] (union eg a b nil))
+  ([eg a b reason]
+   (let [ra (find eg a), rb (find eg b)]
+     (if (= ra rb)
+       [eg ra]
+       (let [classes (:classes eg)
+             wa (weight (nth classes ra)), wb (weight (nth classes rb))
+             [ra rb] (if (or (< wa wb) (and (= wa wb) (< rb ra))) [rb ra] [ra rb])
+             ca (nth classes ra), cb (nth classes rb)
+             analyses? (seq (:analyses eg))
+             by-op (reduce-kv (fn [idx _ node]
+                                (if (term/compound? node)
+                                  (update idx (term/operator node) #(conj (disj (or % #{}) rb) ra))
+                                  idx))
+                              (:by-op eg)
+                              (:nodes cb))
+             uf (reduce (fn [uf id] (assoc uf id ra)) (:uf eg) (:members cb))
+             ;; the nodes that change class sit beside nodes they did not before
+             epoch (:epoch eg)
+             stamps (reduce-kv (fn [stamps nid _] (stamp stamps nid epoch)) (:stamps eg) (:nodes cb))
+             eg (-> eg
+                    (assoc :by-op by-op)
+                    (assoc :uf uf)
+                    (assoc :stamps stamps)
+                    (assoc-in [:classes rb] nil)
+                    (assoc :dirty? true)
+                    (update :pending push-parents (:parents cb))
+                    (cond-> (:journal eg) (update-in [:journal :unions] conj [a b reason])))
+             ;; the join is provisional: rebuild recomputes the merged class
+             ;; from its nodes, and every parent whose child's data changed
+             data (when analyses? (merge-all eg (:data ca) (:data cb)))
+             eg (assoc-in eg [:classes ra] {:id ra
+                                            :members (merge-into (:members ca) (:members cb))
+                                            :nodes (merge-into (:nodes ca) (:nodes cb))
+                                            :parents (merge-into (:parents ca) (:parents cb))
+                                            :data data
+                                            :stamp epoch})
+             eg (if analyses?
+                  (-> (cond-> (update eg :analysis-pending conj ra)
+                        (not= data (:data ca)) (update :analysis-pending push-parents (:parents ca))
+                        (not= data (:data cb)) (update :analysis-pending push-parents (:parents cb)))
+                      (run-reconcile ra [(:data ca) (:data cb)]))
+                  eg)]
+         ;; a modify may union ra into another class
+         (let [eg (run-modify eg ra)]
+           [eg (find eg ra)]))))))
 
 (defn- retire
   "eg with the node of id nid retired in favour of the node of id
@@ -443,7 +462,7 @@
   and nid leaves its class's nodes and its children's parents. nid
   stays a member of the class."
   [eg nid other]
-  (let [[eg _] (union eg other nid)
+  (let [[eg _] (union eg other nid :congruence)
         r (find eg nid)
         node (get (:nodes (nth (:classes eg) r)) nid)]
     (reduce (fn [eg c] (update-in eg [:classes (find eg c) :parents] disj nid))

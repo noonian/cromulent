@@ -1379,10 +1379,10 @@ Constant folding is the degenerate case.
 
 ## 11. Later
 
-- **Explanations**: egg's proof production. A persistent union history
-  makes this easier than in egg; a CAS wants it for "show your work".
-  A proposal, with a proof checker, is in
-  [ideas/explanations.md](ideas/explanations.md).
+- **Explanations**: built 2026-10-25 (Status): an opt-in journal,
+  `cromulent.explain` and the checker `cromulent.derivation`, as
+  [ideas/explanations.md](ideas/explanations.md) proposed; that note
+  records what is still open.
 - **Relational e-matching**, **packed e-node keys**, **per-operator
   indexes**, **egglog-style Datalog rules**: all after v1, all
   API-neutral, all adopted by benchmark.
@@ -1444,6 +1444,12 @@ holding in ClojureScript (orrery's node build and browser self-test):
   section 3.
 - `cromulent.export`: the egraph-serialize JSON, with a printer of its
   own so the text is identical on the three runtimes.
+- Explanations (ideas/explanations.md): `(egraph {:explain? true})`
+  keeps a journal of node births and merging unions, each with a
+  reason; `cromulent.explain` reads a derivation out of it for two
+  ids (`explain`) or two terms (`explain-terms`);
+  `cromulent.derivation` checks a derivation against the rules, sharing no code with the e-graph,
+  and lists the steps it took on trust.
 - `cromulent.gen`: test.check generators for terms, scripts and rules;
   `cromulent.smoke`, the runtime-stable facts.
 
@@ -1451,10 +1457,12 @@ The suite pairs examples (egg's README among them) with properties
 against reference implementations: congruence closure against a
 naive one, matching against a tree matcher, sound rules preserving
 value, saturation closed under its rules, both schedulers and both
-settings of `:skip-stale?` reaching the same e-graph. `clojure
+settings of `:skip-stale?` reaching the same e-graph, a journaled
+run identical to a plain one, and every equality an e-graph holds
+after random scripts and random rules explained by a derivation the
+checker accepts. `clojure
 -M:bench` prints the throughput fixtures. The AC-10 yardstick, last
 measured 2026-10-05, is 2.1 s on the JVM and 4.5 s on Jolt.
 
-Not yet: explanations (ideas/explanations.md), relational
-e-matching, and the rest of section 11. The AC experiments beyond 1
+Not yet: reasons from bendix's analysis, relational e-matching, and the rest of section 11. The AC experiments beyond 1
 to 3 live in bendix.

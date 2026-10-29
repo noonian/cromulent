@@ -32,7 +32,7 @@
   (instantiate the right-hand side, union it with the matched class),
   rebuild, then decide whether to stop. It stops when saturated (no
   union changed the partition and the scheduler has nothing held
-  back) or when it hits an iteration, node or time limit.
+  back; under `:saturation :nodes`, also no node added) or when it hits an iteration, node or time limit.
 
   A match that a rule has applied is not applied again. A pattern
   rule with a pattern right-hand side and no guard says the same thing
@@ -358,8 +358,8 @@
   The limits are checked as `embiggen` checks them: iterations and
   time before the iteration, saturation and the node limit after it."
   [{:keys [egraph rules cells sched state opts t0 stats stop-reason seen] :as run}]
-  (let [{:keys [iter-limit node-limit time-limit-ms check timeline? skip-stale?]
-         :or {iter-limit 30 node-limit 10000 time-limit-ms 5000 skip-stale? true}} opts
+  (let [{:keys [iter-limit node-limit time-limit-ms check timeline? skip-stale? saturation]
+         :or {iter-limit 30 node-limit 10000 time-limit-ms 5000 skip-stale? true saturation :merges}} opts
         iter (inc (count stats))
         g egraph]
     (cond
@@ -412,8 +412,13 @@
                         (when-let [report (:report sched)] (report state iter)))
             ;; the scheduler is only asked whether it can stop when
             ;; nothing was applied, as in egg: that is when backoff
-            ;; releases its bans instead of declaring saturation
-            [state can-stop?] (if (every? zero? (vals applied))
+            ;; releases its bans instead of declaring saturation.
+            ;; Under :saturation :nodes an iteration that added a node
+            ;; is not idle either: an analysis can merge a node into
+            ;; its class while it is added, so its union counts
+            ;; nothing, and the next search still sees it
+            grew? (and (= :nodes saturation) (not= (:next-id g') (:next-id g)))
+            [state can-stop?] (if (and (every? zero? (vals applied)) (not grew?))
                                 ((:can-stop sched) state iter)
                                 [state false])]
         (cond-> (assoc run :egraph g' :state state :seen seen :stats (conj stats stat))
@@ -446,6 +451,18 @@
     :check         nil      (fn [g] problem-or-nil): a dev-mode oracle run on the
                             rebuilt e-graph after each rule's applications;
                             a problem throws ex-info naming the rule
+    :saturation    :merges  when an iteration is idle: :merges, when its
+                            applications merged no classes; :nodes, when
+                            they also added no node (egg's definition).
+                            They differ under an analysis that merges a
+                            node into its class as it is added: there a
+                            right-hand side's union counts nothing, so
+                            :merges stops while new classes are still
+                            unsearched, which is what an analysis that
+                            makes a rule set redundant wants (bendix's
+                            index under commutativity), and :nodes runs
+                            on, which is what a rule set that builds on
+                            its own output wants
 
   Returns {:egraph g' :iterations n :stop-reason r :stats [...] :ms t}
   where r is :saturated, :iter-limit, :node-limit or :time-limit and

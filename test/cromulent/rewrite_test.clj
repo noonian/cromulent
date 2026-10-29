@@ -278,6 +278,47 @@
                              (= egraph (:egraph again))))))))]
     (is (:pass? res) (pr-str res))))
 
+;; An analysis that merges classes of equal value as soon as a node is
+;; added, as bendix's normal-form indexes do.
+(def ^:private value-index
+  {:name :val
+   :make (fn [g node _]
+           (cond (number? node) node
+                 (and (term/compound? node) (= :+ (term/operator node)))
+                 (let [[a b] (map #(eg/data g % :val) (term/children node))] (when (and a b) (+ a b)))
+                 (and (term/compound? node) (= :- (term/operator node)))
+                 (let [[a b] (map #(eg/data g % :val) (term/children node))] (when (and a b) (- a b)))))
+   :merge (fn [_ a b] (if (some? a) a b))
+   :modify (fn [g id]
+             (let [v (eg/data g id :val), other (get-in g [:analysis-state :val v])]
+               (cond (nil? v) g
+                     (and other (not= (eg/find g other) (eg/find g id))) (first (eg/union g other id))
+                     :else (assoc-in g [:analysis-state :val v] (eg/find g id)))))})
+
+(deftest saturation-by-merges-or-by-nodes
+  ;; each application adds c + 1 inside a spelling of c, so the index
+  ;; merges the spelling into c's class while it is added and the
+  ;; union counts nothing; the class of c + 1 is new and the next
+  ;; search must still see it
+  (let [g (first (eg/add (eg/egraph {:analyses [value-index]}) 0))
+        succ (rw/rule "succ"
+                      (fn [g]
+                        (vec (for [r (eg/roots g)
+                                   :let [v (eg/data g r :val)]
+                                   :when (and (number? v) (< v 3))]
+                               {:class r :bindings {'?c r} :rhs '[:- [:+ ?c 1] 1]})))
+                      nil)
+        values (fn [g] (set (keep #(eg/data g % :val) (eg/roots g))))
+        merges (rw/embiggen g [succ] {:scheduler :simple})
+        nodes (rw/embiggen g [succ] {:scheduler :simple :saturation :nodes})]
+    (testing "the default stops when no class merges: after the first iteration"
+      (is (= :saturated (:stop-reason merges)))
+      (is (= 1 (:iterations merges)))
+      (is (= #{0 1} (values (:egraph merges)))))
+    (testing ":saturation :nodes runs until nothing is added"
+      (is (= :saturated (:stop-reason nodes)))
+      (is (= #{0 1 2 3} (values (:egraph nodes)))))))
+
 (deftest schedulers-agree
   ;; when both saturate, backoff reaches the same e-graph as simple:
   ;; same counts, same partition of the input terms

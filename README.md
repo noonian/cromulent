@@ -83,7 +83,11 @@ e-graph after each iteration is the same as if it applied them all
 (`:skip-stale? false` does). The default scheduler is egg's backoff (`:scheduler
 :simple` applies everything, every iteration); `:stats` has per-rule
 match and application counts and phase timings for every iteration,
-and `:timeline? true` keeps every intermediate e-graph. Cost
+and `:timeline? true` keeps every intermediate e-graph. A run is
+saturated when an iteration merges no classes; `:saturation :nodes`
+also requires it to add no node, which matters under an analysis that
+merges a node into its class as it is added, where a rule building on
+its own output would otherwise stop after one iteration. Cost
 functions are `(fn [e-node child-costs] number)`; `ex/extractor`
 shares one cost table across many extractions. Of terms that cost the
 same, the smallest under `cromulent.term/compare-nodes` is the one

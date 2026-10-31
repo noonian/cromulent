@@ -6,9 +6,12 @@
   children; anything that is not a vector is a leaf. E-nodes use the
   same shape with children replaced by e-class ids.
 
-  Every core algorithm reaches the representation only through this
-  namespace, so changing it (a packed key, a record, a protocol) is a
-  change here and nowhere else.")
+  Most of the library reads terms through this namespace. The hot
+  paths do not: cromulent.core's canonicalize and hashcons key,
+  cromulent.pattern's instantiate-registers and cromulent.extract's
+  child-terms and settle index nodes as vectors directly, so changing
+  the representation (a packed key, a record, a protocol) is a change
+  here and in them.")
 
 (defn compound?
   "Is t a compound node (operator + children) rather than a leaf?"

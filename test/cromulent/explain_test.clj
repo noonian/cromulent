@@ -113,7 +113,17 @@
     (testing "a variable the step does not bind"
       (is (= false (:ok? (derivation/check [:rule "commute-add" '{?a 1}] rules)))))
     (testing "a computed rule's pattern step is not taken"
-      (is (= false (:ok? (derivation/check [:rule "fold" '{?a 1 ?b 2}] rules)))))))
+      (is (= false (:ok? (derivation/check [:rule "fold" '{?a 1 ?b 2}] rules)))))
+    (testing "a malformed step is refused, not thrown"
+      (doseq [[d path] [[[:sym] []] [[:refl] []] [[:refl :a :b] []] [[:trans] []]
+                        [[:cong :f :x] []] [[:rule "add-0"] []] [[:rule "add-0" 3] []]
+                        [[:computed "fold" 1] []] [[:asserted :a :b] []]
+                        [[:nope :a] []] [:refl []] [[] []] [nil []]
+                        [[:trans [:refl :a] [:sym]] [2]] [[:cong :f [[:refl :a] [:cong :g]]] [2 1]]]]
+        (let [r (derivation/check d rules)]
+          (is (= false (:ok? r)) (pr-str d))
+          (is (= path (:path r)) (pr-str d))
+          (is (string? (:problem r)) (pr-str d)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; properties

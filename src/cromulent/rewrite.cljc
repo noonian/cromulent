@@ -58,20 +58,37 @@
   experiments can supply their own."
   (:require [cromulent.core :as eg]
             [cromulent.pattern :as pat]
-            [cromulent.platform :as platform]))
+            [cromulent.platform :as platform]
+            [malli.core :as m]))
 
 ;; ---------------------------------------------------------------------------
 ;; rules
+
+(def rule-schema
+  "The shape of a rule map: :name, :lhs and :rhs present (:rhs may be
+  nil), :when absent or a function. What the sides hold is checked
+  when they are compiled."
+  [:map
+   [:name :any]
+   [:lhs :any]
+   [:rhs :any]
+   [:when {:optional true} ifn?]])
+
+(def ^:private rule? (m/validator rule-schema))
+
+(defn- raw [p]
+  (if (pat/compiled? p) (:pattern p) p))
 
 (defn rule
   "A rewrite from lhs to rhs. lhs is a pattern or a searcher
   (fn [eg] matches). rhs is a pattern whose variables all occur in
   lhs, or (fn [eg bindings] pattern-or-nil), or nil when every match
-  of a searcher carries its own :rhs. Options: :when, a guard
+  of a searcher carries its own :rhs. Either side may be compiled
+  (cromulent.pattern/compile). Options: :when, a guard
   (fn [eg bindings] bool)."
   [name lhs rhs & {guard :when}]
   (when-not (or (fn? rhs) (fn? lhs))
-    (let [unbound (remove (pat/variables lhs) (pat/variables rhs))]
+    (let [unbound (remove (pat/variables (raw lhs)) (pat/variables (raw rhs)))]
       (when (seq unbound)
         (throw (ex-info "rhs variables not bound by lhs"
                         {:rule name :lhs lhs :rhs rhs :unbound (set unbound)})))))
@@ -199,9 +216,6 @@
       (reset! cell buf)
       {:buf buf :n n :found found})))
 
-(defn- raw [p]
-  (if (pat/compiled? p) (:pattern p) p))
-
 (defn- union-applied
   "g with the class of id, an instance of the right-hand side, merged
   into the matched class x. With a journal (cromulent.core,
@@ -324,12 +338,12 @@
                           e)))))))
 
 (defn- check-rules [rules]
+  (doseq [r rules]
+    (when-not (rule? r)
+      (throw (ex-info "not a rule" {:rule r}))))
   (let [names (map :name rules)]
     (when (not= (count names) (count (set names)))
-      (throw (ex-info "rule names must be distinct" {:names names})))
-    (doseq [r rules]
-      (when-not (and (contains? r :lhs) (contains? r :rhs))
-        (throw (ex-info "not a rule" {:rule r}))))))
+      (throw (ex-info "rule names must be distinct" {:names names})))))
 
 (defn start
   "A run before its first iteration: rules checked and compiled, the

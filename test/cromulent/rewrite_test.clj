@@ -61,7 +61,20 @@
   (is (thrown? Exception (rw/rule "bad" '[:+ ?a 0] '?b)) "rhs variables must occur in lhs")
   (is (= ["c" "c-rev"] (map :name (rw/bidirectional "c" '[:+ ?a ?b] '[:+ ?b ?a]))))
   (is (thrown? Exception (rw/embiggen (eg/egraph) [(rw/rule "x" '?a '?a) (rw/rule "x" '?a '?a)]))
-      "names must be distinct"))
+      "names must be distinct")
+  (is (thrown-with-msg? Exception #"not a rule" (rw/embiggen (eg/egraph) [{:name "x" :lhs '?a}]))
+      "a rule map without :rhs")
+  (is (thrown-with-msg? Exception #"not a rule" (rw/embiggen (eg/egraph) [{:name "x" :lhs '?a :rhs '?a :when 3}]))
+      "a guard that is not a function")
+  (is (thrown-with-msg? Exception #"not a rule" (rw/embiggen (eg/egraph) [[:+ '?a 0]]))))
+
+(deftest a-compiled-left-hand-side
+  (let [r (rw/rule "c" (pat/compile '[:f ?a]) '[:g ?a])
+        [g a] (eg/add (eg/egraph) [:f :x])
+        {:keys [egraph]} (rw/embiggen g [r])]
+    (is (= (eg/find egraph a) (eg/find egraph (second (eg/add egraph [:g :x]))))))
+  (is (thrown? Exception (rw/rule "c" (pat/compile '[:f ?a]) '[:g ?b]))
+      "its variables still bound the right-hand side's"))
 
 (deftest egg-readme-simple
   ;; (+ 0 (* 1 a)) saturates and extracts to a with cost 1

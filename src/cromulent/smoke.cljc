@@ -1,10 +1,11 @@
 (ns cromulent.smoke
   "Runtime-stable facts about a few fixed runs, the same on the JVM,
   on Jolt and in ClojureScript: class and node counts, costs,
-  iterations, stop reasons, per-rule counts, and extracted terms where
-  the minimum is unique. Ties break on class ids, and ids follow hash
-  iteration order, which differs per runtime, so no id and no tied
-  term is asserted. `checks` is plain data: cromulent.smoke-test
+  iterations, stop reasons, per-rule counts, and extracted terms, ties
+  included: a tie goes to the smaller term, and that order reads no
+  id. Ids after a run follow hash iteration order, which differs per
+  runtime, so none is asserted; only an e-graph that was never run
+  shows its ids (the export fact). `checks` is plain data: cromulent.smoke-test
   asserts it under clojure.test, and orrery's node build prints it
   (`npx shadow-cljs compile smoke && node target/smoke.js`)."
   (:require [cromulent.check :as check]

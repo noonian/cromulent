@@ -155,8 +155,9 @@ cd ../orrery && npm run smoke:local                 # the same facts on node
 The library is `.cljc` and compiles unchanged for ClojureScript
 ([orrery](https://github.com/noonian/orrery), the explorer, builds it
 with shadow-cljs). `cromulent.platform` is the one file that knows the
-runtime, the clock; the two `catch` clauses in `cromulent.rewrite` are
-the only other reader conditionals. The hashcons key is `op·2^42 +
+runtime, the clock; the only other reader conditionals are the
+exception class in four `catch` clauses, two in `cromulent.rewrite`
+and two in `cromulent.derivation`. The hashcons key is `op·2^42 +
 a·2^21 + b`, under 2^53 so that it is exact in a JavaScript double as
 well as a fixnum on Chez and a long on the JVM; an e-graph therefore
 holds at most 2 048 operators and 2 097 150 class ids, and either

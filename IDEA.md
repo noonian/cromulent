@@ -12,7 +12,7 @@ rebuilding, e-class analyses, a phased runner. hegg (Haskell) shows the
 same design survives purity. What is new here is (a) the persistent
 value as the primary representation, with a data model shaped so
 that mutable working copies can be introduced where measurement says
-so, and (b) the AC work in ac-problem.md.
+so, and (b) the work on associative-commutative (AC) operators.
 
 Working name: **cromulent**. Every e-node in an e-class is a perfectly
 cromulent form of the same thing. Saturation, which grows the graph,
@@ -147,17 +147,19 @@ The functions of `cromulent.core` are the API; this shape is the
 implementation's and changes when a measurement says so. A reader
 that wants a class's nodes or parents asks `nodes` and `parents`.
 
-A tiny `TermLike` protocol (`operator`, `children`, `make-node`,
-`leaf?`) is extended to vectors by default, so the CAS or the
-catalytic libraries could change representation without touching the
-core. It is also the seam that lets the internal e-node form differ
-from the user's. Do not build anything else generic.
+`cromulent.term` is the seam between the user's term shape and the
+engine: plain functions (`compound?`, `operator`, `children`, `make`,
+`map-children`, `compare-nodes`) over tagged vectors, no protocol.
+Most code reads terms through it, but the hot paths (`canonicalize`,
+the hashcons key, compiled patterns, extraction) index nodes as
+vectors directly, so a new representation would touch them too. Do
+not build anything else generic.
 
 ## 3. Invariants
 
-After `rebuild` (and after any scope exit), all of these hold; a
-`check-invariants` function asserts them in tests after every
-operation:
+After `rebuild` (and after any scope exit), all of these hold;
+`cromulent.check/violations` lists the broken ones (`check!` throws
+on any), and tests call it after every operation:
 
 1. Every non-nil entry of `:classes` is at a union-find root, and its
    `:members` are exactly the ids whose root it is.
@@ -270,7 +272,8 @@ that re-keys its node removes it; a canonical lookup can never hit
 one meanwhile, because a non-root id never becomes a root again.
 
 Termination: each union strictly reduces the number of roots; each
-analysis change strictly climbs a finite lattice. Same argument as egg.
+analysis change strictly descends its analysis's order, which must be
+well-founded (section 9). Same argument as egg.
 
 ## 5. Persistence and performance
 
@@ -290,7 +293,7 @@ Philip Zucker's Lambda MicroEgg post (philipzucker.com/lambda_miller_egg,
 associativity rule and reports, on his machine, egg at about 0.6 s
 and his Rust at 1.5 s, with per-phase times. The same run here
 (`bench/` `ac-sum` at 10: 1 023 classes and 57 012 nodes, exactly the
-formula of ../design/ac-problem.md section 1, which his counts
+closed-form count for a sum of n atoms under AC, which his counts
 confirm to the node; 3.34 million matches over ten iterations, 136
 thousand of them applied):
 
@@ -1101,14 +1104,13 @@ run deep rules on a large settled graph.
   iteration changed (2026-10-05, above; before that, a full copy).
   `(diff eg1 eg2)` is a set difference on `:memo`.
 - **Speculation.** Run a risky or expensive burst of rules on a copy
-  (free), keep it only if extraction improves. This is approach D in
-  ../design/ac-problem.md and needs no undo log.
+  (free), keep it only if extraction improves. It needs no undo log.
 - **Value equality** of e-graphs.
 
 **Benchmarks from the first milestone**, in `bench/` per the
 catalytic convention, timed with `System/nanoTime` on both runtimes
 and with `jolt build` native binaries for headline numbers. Fixtures:
-the sum-of-*n* AC blowup (../design/ac-problem.md), egg's `math` rule set and
+the sum-of-*n* AC blowup, egg's `math` rule set and
 its standard inputs, and a mixed CAS workload once bendix has one.
 Every performance option above is adopted or rejected by a row in
 that table, not by taste.
@@ -1188,8 +1190,8 @@ pattern is **compiled once** into a plan and matched by index loops:
 Later, by benchmark: the relational e-matcher (Zhang et al. 2022).
 It would not change the API.
 
-AC patterns (bag children, rest variables) are a matcher extension
-specified in ../design/ac-problem.md, not part of v1.
+AC patterns (bag children, rest variables) are a matcher extension,
+not part of v1.
 
 ## 7. Rewrites and the runner
 
@@ -1211,7 +1213,9 @@ depend on rule order:
 2. **apply**: for each match, instantiate `:rhs` under the bindings,
    add it, union with the matched class.
 3. **rebuild**.
-4. **stop?** Saturated (no new node, no union); or `:iter-limit`,
+4. **stop?** Saturated (no application merged two classes and the
+   scheduler holds nothing back; under `:saturation :nodes`, also no
+   node added, which is egg's definition); or `:iter-limit`,
    `:node-limit`, `:time-limit`.
 
 ```clojure
@@ -1226,8 +1230,7 @@ Schedulers: `:simple` (everything, every iteration) and `:backoff`
 number of iterations; `:match-limit` 1000 and `:ban-length` 5 by
 default). A scheduler is a map `{:init :search :can-stop :report}`,
 so the AC experiments can bring their own. Backoff is not our answer
-to AC; it is the baseline the AC experiments (../design/ac-problem.md)
-are measured against. A pattern rule's matches travel between the
+to AC; it is the baseline the AC experiments are measured against. A pattern rule's matches travel between the
 phases as a flat buffer, `{:buf long-array :n count :found count}`,
 never as maps; a searcher's are a vector of maps; `match-count` counts
 either, and `[]` from a scheduler means none. Of the `:found` matches
@@ -1259,7 +1262,14 @@ an iteration's result is independent of rule and match order. A
 match counts as applied only when its union merged two classes;
 saturation is "nothing applied and the scheduler holds nothing back",
 and the scheduler is only asked when nothing was applied (that is when
-backoff releases a ban instead of stopping).
+backoff releases a ban instead of stopping). `:saturation :nodes`
+also counts an iteration that added a node as not idle: an analysis
+that merges a node into its class as it is added makes the union
+count nothing, so the default (`:merges`) stops while new classes are
+still unsearched, which is what an analysis that makes a rule set
+redundant wants (bendix's index under commutativity), and `:nodes`
+runs on, which is what a rule set that builds on its own output
+wants.
 
 ## 8. Extraction
 
@@ -1351,12 +1361,12 @@ scoped rebuild can hand them a working copy unchanged.
 
 **Analysis-driven merging** (`:modify` unioning two classes whose data
 proves them equal) is how the CAS brings decision procedures into the
-e-graph (../bendix/IDEA.md, ../design/ac-problem.md approach C).
+e-graph (../bendix/IDEA.md).
 Constant folding is the degenerate case.
 
 ## 10. Testing
 
-- `check-invariants` after every operation in tests (section 3).
+- `check/violations` after every operation in tests (section 3).
 - test.check generators: random terms over a small signature, random
   sequences of `add`/`merge`/`rebuild`, random rule sets. Properties:
   invariants hold; `find` is idempotent; the old value is unchanged

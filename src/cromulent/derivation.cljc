@@ -25,8 +25,10 @@
   The checker confirms that a derivation follows from the rules and the
   trusted steps; it never judges whether a rule is true. A rule with a
   guard is checked as its two sides and reported as trusted, since its
-  guard is not checked."
-  (:require [cromulent.term :as term]))
+  guard is not checked. A step's shape, the table above, is a malli
+  schema; what its parts derive is checked step by step."
+  (:require [cromulent.term :as term]
+            [malli.core :as m]))
 
 (defn- variable? [x]
   (and (symbol? x)
@@ -46,6 +48,23 @@
 (defn- by-name [rules]
   (if (map? rules) rules (into {} (map (juxt :name identity)) rules)))
 
+(def step-schema
+  "The shape of one derivation step, its parts unchecked: a step inside
+  it is checked where it is concluded."
+  [:multi {:dispatch (fn [s] (when (vector? s) (nth s 0 nil)))}
+   [:refl {:shape "[:refl t]"} [:tuple :keyword :any]]
+   [:sym {:shape "[:sym d]"} [:tuple :keyword :any]]
+   [:trans {:shape "[:trans d1 ... dn], n at least 1"} [:cat :keyword [:+ :any]]]
+   [:cong {:shape "[:cong op [d1 ... dk]]"} [:tuple :keyword :any [:sequential :any]]]
+   [:rule {:shape "[:rule name sigma], sigma a map"} [:tuple :keyword :any :map]]
+   [:computed {:shape "[:computed name s t]"} [:tuple :keyword :any :any :any]]
+   [:asserted {:shape "[:asserted s t reason]"} [:tuple :keyword :any :any :any]]])
+
+(def ^:private step? (m/validator step-schema))
+
+(def ^:private shapes
+  (into {} (map (fn [[k props _]] [k (:shape props)])) (m/children step-schema)))
+
 (defn- fail [path step problem & {:as more}]
   (throw (ex-info problem (merge {::invalid true :path path :step step :problem problem} more))))
 
@@ -53,8 +72,10 @@
   "[a b], the equation step derives. Trusted steps are added to
   trusted, a volatile vector. path is where step sits in the derivation."
   [step rules trusted path]
-  (when-not (and (vector? step) (keyword? (first step)))
-    (fail path step "not a derivation step"))
+  (when-not (step? step)
+    (if-let [shape (when (vector? step) (get shapes (nth step 0 nil)))]
+      (fail path step (str "malformed: a " (nth step 0) " step is " shape))
+      (fail path step "not a derivation step")))
   (case (nth step 0)
     :refl [(nth step 1) (nth step 1)]
 
@@ -62,7 +83,6 @@
 
     :trans
     (let [eqs (map-indexed (fn [i p] (conclude p rules trusted (conj path (inc i)))) (subvec step 1))]
-      (when (empty? eqs) (fail path step "an empty chain"))
       (reduce (fn [[a b] [i [c d]]]
                 (if (= b c)
                   [a d]

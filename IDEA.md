@@ -1393,6 +1393,9 @@ Constant folding is the degenerate case.
   `cromulent.explain` and the checker `cromulent.derivation`, as
   [ideas/explanations.md](ideas/explanations.md) proposed; that note
   records what is still open.
+- **Snapshots**: an e-graph written to disk and restored, so long
+  saturations survive limits and restarts and e-graphs move between
+  machines; proposed in [ideas/serialization.md](ideas/serialization.md).
 - **Relational e-matching**, **packed e-node keys**, **per-operator
   indexes**, **egglog-style Datalog rules**: all after v1, all
   API-neutral, all adopted by benchmark.

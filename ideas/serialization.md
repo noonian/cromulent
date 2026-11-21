@@ -1,7 +1,9 @@
 # Snapshots: an e-graph as data on disk
 
-A proposal, written 2026-11-19. It adds "Snapshots" to IDEA.md
-section 11.
+A proposal, written 2026-11-19. Built 2026-11-20 as
+`cromulent.snapshot`: sections 3 and 5 as written, apart from what
+section 6 records the building decided; section 6 also lists what
+is still open. It fills in "Snapshots" in IDEA.md section 11.
 
 ## The short of it
 
@@ -102,3 +104,60 @@ Names are placeholders, to be settled when built.
   through, under the simple scheduler.
 - A refused snapshot: an analysis keeping a function in its data.
 - The smoke facts: one restored fixture on all three runtimes.
+
+## 6. What the building decided (2026-11-20)
+
+- **Names.** `snapshot` and `restore` for e-graphs, `snapshot-run`
+  and `restore-run` for runs, in `cromulent.snapshot`, which sits
+  above `cromulent.rewrite` as `cromulent.explain` does. The core
+  gained only the contract clause, in `egraph`'s docstring. The
+  envelopes are `{:cromulent/snapshot 1 ...}` and
+  `{:cromulent/run-snapshot 1 ...}`; `restore` refuses any other
+  version, and a malli schema (`snapshot-schema`) checks the
+  envelope's shape.
+- **The whole map is checked, not only the analyses.** Leaves,
+  operators and journal reasons are the caller's values too, so
+  `snapshot` walks everything and refuses with the path and the
+  value, naming the analysis when the path is under a class's
+  `:data` or `:analysis-state`. On a saturated sum of eight atoms
+  (6 058 nodes, no analyses) the walk takes 2.1 ms and `pr-str`
+  22 ms, which is 75 bytes a node, so the check costs about a tenth
+  of the cheapest encoding. A first version tested `inst?` before
+  the collections and took 80 ms: `inst?` is a protocol check, slow
+  when it fails.
+- **Runs resume exactly.** `restore-run` takes the rules (the same
+  names, in order) and the options again, calls `start`, and puts
+  back the scheduler's state, `:seen` (the epoch each rule last
+  applied at), the stats and the elapsed time. The timeline comes
+  along, each e-graph whole. A run snapshotted after any number of
+  iterations, sent through EDN and restored finishes as the run
+  straight through did, under both schedulers: the same e-graph,
+  stop reason, iterations and stats, timings aside (a property over
+  random rules, and the sum of five after every iteration). Dropping
+  the scheduler's state or `:seen` on restore fails that property.
+- **The limits count the whole run.** `:iter-limit` counts its
+  iterations and `:time-limit-ms` its time, the time between snapshot
+  and restore excepted, so going on past a limit means restoring
+  under a higher one. A stop reason that still holds is kept:
+  `:saturated`, and `:node-limit` while the e-graph has more nodes
+  than the limit given. Clearing every stop reason, the first idea,
+  would have made a run capped by nodes take one more iteration on
+  restore under the same options.
+- **The smoke facts.** `cromulent.smoke` carries a snapshot written
+  on the JVM as EDN text (egg's README rules on 0 + 1·a, packed keys
+  past 2^32) and reads it at run time, so the fact checks the
+  reader on each runtime, and a run of the sum of five saved after
+  three iterations under backoff and finished. Both hold on the JVM,
+  Jolt and ClojureScript (orrery's node build). Reading EDN is the
+  smoke namespace's one reader conditional: `clojure.edn` or
+  `cljs.reader`.
+
+Still open:
+
+- Incremental snapshots (a base and diffs) for timelines on disk.
+- A binary encoding on Jolt, and a measured one on the JVM for large
+  e-graphs: EDN at 75 to 240 bytes a node is still gigabytes at
+  millions of nodes.
+- ribbon's resume: saving every k iterations of the n = 9 run, with
+  its rules' own state, is the first real use and the test of
+  section 1's claim.

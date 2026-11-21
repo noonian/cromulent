@@ -142,6 +142,29 @@ right-hand side are `:asserted` and `:computed` steps, which the
 checker accepts on trust and lists under `:trusted`. Derivations
 are written out in full, so a long run can make a long one.
 
+**Snapshots** make an e-graph, or a run in progress, data that
+outlives the process. A snapshot is the e-graph map without its
+analyses' functions; `restore` takes the analyses again. The
+encoding is yours: EDN, Transit, Nippy, Fressian.
+
+```clojure
+(require '[cromulent.snapshot :as snap] '[clojure.edn :as edn])
+
+(spit "g.edn" (pr-str (snap/snapshot g)))
+(snap/restore (edn/read-string (slurp "g.edn")) {:analyses [const-fold]})
+
+;; a long saturation, saved between iterations and resumed elsewhere
+(def saved (snap/snapshot-run (rw/step (rw/step (rw/start g rules opts)))))
+(rw/finish (loop [run (snap/restore-run saved rules opts)]
+             (if (:stop-reason run) run (recur (rw/step run)))))
+;; => the result one embiggen call would have given
+```
+
+Analysis data must be plain data for this; `snapshot` refuses
+anything else, naming the analysis. EDN is about 75 to 240 bytes a
+node, depending on the analyses, so it suits fixtures and moderate
+e-graphs.
+
 ## Running
 
 ```
@@ -157,7 +180,8 @@ The library is `.cljc` and compiles unchanged for ClojureScript
 with shadow-cljs). `cromulent.platform` is the one file that knows the
 runtime, the clock; the only other reader conditionals are the
 exception class in four `catch` clauses, two in `cromulent.rewrite`
-and two in `cromulent.derivation`. The hashcons key is `op·2^42 +
+and two in `cromulent.derivation`, and the EDN reader
+`cromulent.smoke` requires. The hashcons key is `op·2^42 +
 a·2^21 + b`, under 2^53 so that it is exact in a JavaScript double as
 well as a fixnum on Chez and a long on the JVM; an e-graph therefore
 holds at most 2 048 operators and 2 097 150 class ids, and either

@@ -7,6 +7,7 @@
             [cromulent.extract-test]
             [cromulent.export-test]
             [cromulent.explain-test]
+            [cromulent.snapshot-test]
             [cromulent.smoke-test]))
 
 (defn -main [& _]
@@ -16,5 +17,6 @@
                                           'cromulent.extract-test
                                           'cromulent.export-test
                                           'cromulent.explain-test
+                                          'cromulent.snapshot-test
                                           'cromulent.smoke-test)]
     (System/exit (if (pos? (+ fail error)) 1 0))))

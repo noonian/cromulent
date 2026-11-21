@@ -5,8 +5,10 @@
   included: a tie goes to the smaller term, and that order reads no
   id. Ids after a run follow hash iteration order, which differs per
   runtime, so none is asserted; only an e-graph that was never run
-  shows its ids (the export fact). `checks` is plain data: cromulent.smoke-test
-  asserts it under clojure.test, and orrery's node build prints it
+  shows its ids (the export fact), and a fixture read from text has
+  the ids it was written with (the snapshot fact). `checks` is plain
+  data: cromulent.smoke-test asserts it under clojure.test, and
+  orrery's node build prints it
   (`npx shadow-cljs compile smoke && node target/smoke.js`)."
   (:require [cromulent.check :as check]
             [cromulent.core :as eg]
@@ -16,7 +18,9 @@
             [cromulent.pattern :as pat]
             [cromulent.derivation :as derivation]
             [cromulent.rewrite :as rw]
-            [cromulent.term :as term]))
+            [cromulent.snapshot :as snapshot]
+            [cromulent.term :as term]
+            #?(:clj [clojure.edn :as edn] :default [cljs.reader :as edn])))
 
 (def egg-rules
   "The rule set of egg's README."
@@ -62,6 +66,20 @@
                  (let [[g cid] (eg/add g d)]
                    (first (eg/union g id cid)))
                  g)))})
+
+(def fixture
+  "A snapshot written on the JVM as EDN text: egg's README rules
+  saturated on 0 + 1·a under the simple scheduler, the root of the
+  term being id 4. Its packed keys pass 2^32, so reading it in
+  JavaScript checks that they survive. Rewrite it if the snapshot
+  format's version changes."
+  "{:cromulent/snapshot 1, :analyses [], :egraph {:epoch 2, :next-id 7, :pending [], :dirty? false, :stamps [0 0 2 2 2 2 2], :analysis-pending [], :ops {:* 0, :+ 1}, :analysis-state {}, :by-op {:* #{3}, :+ #{3}}, :uf [0 1 3 3 3 3 3], :memo-other {0 0, 1 1, :a 2}, :memo {4398046511107 4, 4398052802560 5, 2097155 3, 6291457 6}, :op-names [:* :+], :classes [{:id 0, :members [0], :nodes {0 0}, :parents #{4 5}, :data {}, :stamp 0} {:id 1, :members [1], :nodes {1 1}, :parents #{6 3}, :data {}, :stamp 0} nil {:id 3, :members [3 6 4 5 2], :nodes {3 [:* 1 3], 6 [:* 3 1], 4 [:+ 0 3], 5 [:+ 3 0], 2 :a}, :parents #{4 6 3 5}, :data nil, :stamp 2} nil nil nil]}}")
+
+(defn- through-edn [x]
+  (edn/read-string (binding [*print-length* nil *print-level* nil] (pr-str x))))
+
+(defn- run-out [run]
+  (rw/finish (loop [run run] (if (:stop-reason run) run (recur (rw/step run))))))
 
 (defn- expensive-mul [node child-costs]
   (+ (if (and (term/compound? node) (= :* (term/operator node))) 10 1)
@@ -184,6 +202,18 @@
                                         (= lhs (explain/term g m)) (= rhs (explain/term g r)))))
                                (:members (eg/eclass g r))))
                      (eg/roots g))))
+     (fact "snapshot: the fixture written on the JVM restores here: classes, nodes, invariants, extraction, and the hashcons finds the term"
+           [3 7 true {:cost 1 :term :a} true]
+           (let [g (snapshot/restore (edn/read-string fixture))]
+             [(eg/class-count g) (eg/node-count g) (empty? (check/violations g)) (ex/extract g 4)
+              (= g (first (eg/add g [:+ 0 [:* 1 :a]])))]))
+     (fact "snapshot: sum of five, backoff, saved as EDN after three iterations, restored and run on: the run straight through"
+           [true :saturated 31 185]
+           (let [opts {:scheduler :backoff :match-limit 4 :ban-length 2}
+                 run (nth (iterate rw/step (rw/start g5 ac-rules opts)) 3)
+                 resumed (run-out (snapshot/restore-run (through-edn (snapshot/snapshot-run run)) ac-rules opts))]
+             [(= (:egraph ac-backoff) (:egraph resumed)) (:stop-reason resumed)
+              (eg/class-count (:egraph resumed)) (eg/node-count (:egraph resumed))]))
      (fact "derivation: a chain whose links do not meet is refused at the second link"
            [false [2]]
            ((juxt :ok? :path)

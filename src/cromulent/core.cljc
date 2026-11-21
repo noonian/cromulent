@@ -109,6 +109,11 @@
   rebuild terminate; `rebuild` asserts it with a round limit and
   throws rather than spin if an analysis breaks it.
 
+  An analysis's data and its :analysis-state are plain data: no
+  functions, atoms, records or host objects. Then the e-graph without
+  :analyses is data, and cromulent.snapshot can write it out and
+  restore it.
+
   With :explain? true the e-graph keeps a journal of node births and
   merging unions, for cromulent.explain; it costs a `conj` per new
   node and per merging union."

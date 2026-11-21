@@ -1393,9 +1393,9 @@ Constant folding is the degenerate case.
   `cromulent.explain` and the checker `cromulent.derivation`, as
   [ideas/explanations.md](ideas/explanations.md) proposed; that note
   records what is still open.
-- **Snapshots**: an e-graph written to disk and restored, so long
-  saturations survive limits and restarts and e-graphs move between
-  machines; proposed in [ideas/serialization.md](ideas/serialization.md).
+- **Snapshots**: built 2026-11-20 (Status): `cromulent.snapshot`,
+  as [ideas/serialization.md](ideas/serialization.md) proposed; that
+  note records what the building decided and what is still open.
 - **Relational e-matching**, **packed e-node keys**, **per-operator
   indexes**, **egglog-style Datalog rules**: all after v1, all
   API-neutral, all adopted by benchmark.
@@ -1463,6 +1463,12 @@ holding in ClojureScript (orrery's node build and browser self-test):
   ids (`explain`) or two terms (`explain-terms`);
   `cromulent.derivation` checks a derivation against the rules, sharing no code with the e-graph,
   and lists the steps it took on trust.
+- Snapshots (ideas/serialization.md): `cromulent.snapshot` writes an
+  e-graph as plain data, in any state, and restores it with the
+  caller's analyses (`snapshot`, `restore`), and does the same for a
+  run between iterations (`snapshot-run`, `restore-run`); encoding is
+  the caller's. A fixture written on the JVM restores on all three
+  runtimes.
 - `cromulent.gen`: test.check generators for terms, scripts and rules;
   `cromulent.smoke`, the runtime-stable facts.
 
@@ -1471,7 +1477,8 @@ against reference implementations: congruence closure against a
 naive one, matching against a tree matcher, sound rules preserving
 value, saturation closed under its rules, both schedulers and both
 settings of `:skip-stale?` reaching the same e-graph, a journaled
-run identical to a plain one, and every equality an e-graph holds
+run identical to a plain one, a run snapshot through EDN and
+resumed identical to one straight through, and every equality an e-graph holds
 after random scripts and random rules explained by a derivation the
 checker accepts. `clojure
 -M:bench` prints the throughput fixtures. The AC-10 yardstick, last
